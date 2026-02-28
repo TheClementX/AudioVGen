@@ -4,10 +4,9 @@ I. Already done
     a. data processing scripts created. 
 
 II. Todo / Timeline (near future)
-    a. select a maskvat architecture to implement 
-    b. after selection determine what input needs to look like
-    c. make pytorch datasets for data
-    d. implement model 
+  implement data loaders
+  finish pre-encodidng script in download_preprocess.py
+  implement maskvat_adaln
 
 DOCUMENTATION: 
 I. Data 
@@ -25,6 +24,9 @@ II. data processing scripts
         -> downloads the specified dataset from hugging face
     d. untar.py
         -> untars all downloaded tar files from hugging face
+    e. download_preprocess.py
+        -> does everything all in one
+        -> includes option to pre-encode wav files (need to implement
     e. data_comp.py
         -> (MUST BE MADE) combines the top 4 scripts into one for comprehensive datadownload 
         and preproccessing
