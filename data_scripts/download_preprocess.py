@@ -23,6 +23,12 @@ from pathlib import Path
 from tqdm import tqdm 
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed 
+import dac
+from audiotools import AudioSignal
+import numpy as np 
+from transformers import CLIPProcessor, CLIPModel #hugging face transformers lib
+import torch
+from torchvision.models.video import s3d, S3D_Weights
 
 """
 DOWNLOADING AND PREPROCESSING FLAGS
@@ -30,6 +36,7 @@ DOWNLOADING AND PREPROCESSING FLAGS
     -> untaring flags
     -> sharding flags
     -> data_prep flags
+    -> pre_encoding flags
 """
 #download flags
 FULL_DOWNLOAD = False #download all of the dataset
@@ -54,10 +61,18 @@ SHARD_DIR = './VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound
 #data preprocess flags
 #process dir should be the dir where you downloaded VGGSound and sharded
 PROCESS_DIR = './VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video'
-MAX_WORKERS = os.cpu_count()
+MAX_WORKERS = max(1, os.cpu_count() - 2)
+
+#pre encoding flags
+PREENCODE = False
+PREENCODE_DIR = './VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video'
+if torch.cuda.is_available(): 
+    DEVICE = torch.device('cuda')
+else 
+    DEVICE = torch.device('cpu')
 
 """
-data processing functions
+data processing functions ##############################################################################
 """
 def generate_tar_names(): 
     names = []
@@ -167,7 +182,8 @@ def process_video(file, fname, video_path, audio_path):
     video_command = [
         'ffmpeg', '-i', file, '-an', 
         '-t', '10',
-        '-vcodec', 'copy', 
+        '-vcodec', 'libx264', 
+        '-pix_fmt', 'yuv420p', 
         '-y', '-loglevel', 'error',
         video_out
     ]
@@ -238,12 +254,82 @@ def prep_data():
 
     print("finished processing data")
 
-#link all commands for processing
+"""
+PRE-ENCODING PIPELINE ##################################################################
+"""
+
+"""
+pre-encode function to encode audio into descritized DAC tokens
+mandatory to do before training. 
+Must make an .npz file of DAC and BEATS encoding
+"""
+def pre_encode_audio(): 
+    #Load DAC 
+    model_path = dac.utils.download(model_type="44khz")
+    model = dac.DAC.load(model_path)
+    model.to('cuda')
+
+    #load BEATSs
+
+    #encode
+    dirs = os.listdir(PREENCODE_DIR)
+    for dir in dirs: 
+        audio_pth = os.path.join(PREENCODE_DIR, 'dir', 'audio')
+        dac_pth = os.path.join(PREENCODE_DIR, 'dir', 'audio_encode')
+
+        names = os.listdir(audio_pth)
+        for name in names: 
+            #load wav
+            signal = AudioSignal(name)
+            signal.to(model.device)
+            #process 
+            #save
+
+    return 0
+
+"""
+pre-encode function to encode rgb frames using S3D and CLIP encodings
+must make a .npz file of CLIP and S3D encodings
+"""
+def pre_encode_video(): 
+    #load S3D
+    s3d_weights = S3D_Weights.KINETICS400_V1
+    s3d_model = s3d(weights=s3d_weights).to(device)
+    s3d_model.eval()
+    s3d_preprocess = s3d_weights.transforms()
+
+    #load CLIP
+    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+    clip_model.eval()
+    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+    #enumerate shard dirs
+    shard_dirs = os.listdir(PREENCODE_DIR)
+    for dir in dirs: 
+        video_pth = os.path.join(PREENCODE_DIR, 'dir', 'video')
+        output_path = os.path.join(PREENCODE_DIR, 'dir', 'video_encode')
+
+        names = os.listdir(video_pth)
+        for name in names: 
+            #load tensor
+            #process 
+            #save
+    
+    return 0
+
+"""
+MAIN (select desired operations) ####################################################
+"""
+
+#link all desired commands for processing
 def main(): 
+    #donwloading and processing
 #     download_data()
     untar_data()
     shard()
     prep_data()
+
+    #create encodings
 
 if __name__ == "__main__": 
     main()
