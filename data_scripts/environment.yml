@@ -6,13 +6,15 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - pytorch
+  - pytorch>=2.6.0
   - torchvision
+  - av
   - torchaudio
   - pytorch-cuda=12.1
   - conda-forge::ffmpeg #may have a dependency error on installation
   - tqdm
   - pip
+  - transformers
   - pip:
     - huggingface_hub
     - descript-audio-codec
