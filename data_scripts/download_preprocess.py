@@ -333,7 +333,7 @@ def pre_encode_audio():
                 dac_processed = dac_model.preprocess(
                     signal.audio_data, signal.sample_rate
                 )
-                dac_features = dac_model.encode(dac_processed)[0].cpu()
+                dac_features = dac_model.encode(dac_processed)[1].cpu()
 
                 beats_mask = torch.zeros(beats_input.shape).bool().to("cuda")
                 beats_features = beats_model.extract_features(
