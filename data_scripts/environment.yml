@@ -13,6 +13,7 @@ dependencies:
   - conda-forge::ffmpeg #may have a dependency error on installation
   - tqdm
   - pip
+  - transformers
   - pip:
     - huggingface_hub
     - descript-audio-codec
