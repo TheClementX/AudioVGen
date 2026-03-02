@@ -28,6 +28,7 @@ from audiotools import AudioSignal
 import numpy as np 
 from transformers import CLIPProcessor, CLIPModel #hugging face transformers lib
 import torch
+import torchvision
 from torchvision.models.video import s3d, S3D_Weights
 
 """
@@ -68,8 +69,11 @@ PREENCODE = False
 PREENCODE_DIR = './VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video'
 if torch.cuda.is_available(): 
     DEVICE = torch.device('cuda')
-else 
+else:
     DEVICE = torch.device('cpu')
+
+print(f'device: {DEVICE}')
+print(f'Workers: {MAX_WORKERS}')
 
 """
 data processing functions ##############################################################################
@@ -182,8 +186,10 @@ def process_video(file, fname, video_path, audio_path):
     video_command = [
         'ffmpeg', '-i', file, '-an', 
         '-t', '10',
-        '-vcodec', 'libx264', 
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
         '-pix_fmt', 'yuv420p', 
+        '-threads', '1', 
         '-y', '-loglevel', 'error',
         video_out
     ]
@@ -264,28 +270,7 @@ mandatory to do before training.
 Must make an .npz file of DAC and BEATS encoding
 """
 def pre_encode_audio(): 
-    #Load DAC 
-    model_path = dac.utils.download(model_type="44khz")
-    model = dac.DAC.load(model_path)
-    model.to('cuda')
-
-    #load BEATSs
-
-    #encode
-    dirs = os.listdir(PREENCODE_DIR)
-    for dir in dirs: 
-        audio_pth = os.path.join(PREENCODE_DIR, 'dir', 'audio')
-        dac_pth = os.path.join(PREENCODE_DIR, 'dir', 'audio_encode')
-
-        names = os.listdir(audio_pth)
-        for name in names: 
-            #load wav
-            signal = AudioSignal(name)
-            signal.to(model.device)
-            #process 
-            #save
-
-    return 0
+    pass
 
 """
 pre-encode function to encode rgb frames using S3D and CLIP encodings
@@ -294,56 +279,89 @@ must make a .npz file of CLIP and S3D encodings
 def pre_encode_video(): 
     #load S3D
     s3d_weights = S3D_Weights.KINETICS400_V1
-    s3d_model = s3d(weights=s3d_weights).to(device)
+    s3d_model = s3d(weights=s3d_weights).to(DEVICE)
     s3d_model.eval()
     s3d_preprocess = s3d_weights.transforms()
 
     #load CLIP
-    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32", use_safetensors=True).to(DEVICE)
     clip_model.eval()
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
     #enumerate shard dirs
     shard_dirs = os.listdir(PREENCODE_DIR)
-    for dir in dirs: 
-        video_pth = os.path.join(PREENCODE_DIR, 'dir', 'video')
-        output_path = os.path.join(PREENCODE_DIR, 'dir', 'video_encode')
+    for dir in tqdm(shard_dirs, desc="Pre-encoding shard dirs"): 
+        video_pth = os.path.join(PREENCODE_DIR, dir, 'video')
+        output_pth = os.path.join(PREENCODE_DIR, dir, 'video_encode')
+        os.makedirs(output_pth, exist_ok=True)
+
+        if not os.path.exists(video_pth): 
+            continue
 
         names = os.listdir(video_pth)
-        for name in names: 
+        for name in tqdm(names, desc=f"Encoding {dir} Files", leave=False): 
             """
             load tensor
             -> (Time, H, W, channels)
             -> normalize
             -> (Time, Channels, H, W)
             """
-            v_tensor, _, _ = torchvision.io.read_video(video_pth, pts_units="sec")
-            v_tensor = v_tensor.float() / 255.0
+            video_name = os.path.join(video_pth, name)
+            v_tensor, _, _ = torchvision.io.read_video(video_name, pts_unit="sec")
             v_tensor = v_tensor.permute(0, 3, 1, 2)
 
             #process CLIP
+            clip_frames = []
+            clip_batch_size = 32
+            frames_np = v_tensor.numpy()
             with torch.no_grad(): 
-                clip_in = clip_processor(images=v_tensor, return_tensor="pt").to(DEVICE)
+                for i in range(0, len(frames_np), clip_batch_size): 
+                    frames = frames_np[i:i+clip_batch_size]
+                    batch_in = clip_processor(images=frames, return_tensors="pt").to(DEVICE)
 
-                clip_out = clip_model(**clip_in).image_embeds
-                #FINAL (time, 512)
-                clip_out = clip_out.cpu().numpy()
+                    batch_out = clip_model.get_image_features(**batch_in)
+
+                    #check return type of clip_model
+                    if hasattr(batch_out, "image_embeds"):
+                        batch_tensor = batch_out.image_embeds
+                    elif hasattr(batch_out, "pooler_output"):
+                        batch_tensor = batch_out.pooler_output
+                    else:
+                        batch_tensor = batch_out
+                    #FINAL (time, 512)
+                    clip_frames.append(batch_tensor.cpu())
+            #concat all processed frames
+            clip_out = torch.cat(clip_frames, dim=0).numpy()
+
 
             #process S3D
             with torch.no_grad(): 
+                s3d_frames = []
+                batch_size = 64
+
                 #(channels, time, h, w)
-                s3d_in = v_tensor.permute(1, 0, 2, 3)
-                #(batch, channels, time, h, w)
-                s3d_in = s3d_preprocess(s3d_in).unsqueeze(0).to(DEVICE)
+                s3d_in_full = s3d_preprocess(v_tensor)
+                for i in range(0, s3d_in_full.shape[1], batch_size): 
+                    s3d_in = s3d_in_full[:, i:i+batch_size, :, :]
+                    #(batch, time, channels, h, w)
+                    s3d_in = s3d_in.unsqueeze(0).to(DEVICE)
 
-                s3d_out = s3d_model.features(s3d_in).
-                #(batch, channels, time)
-                s3d_out = torch.mean(s3d_out, dims=(3, 4))
-                #FINAL (time, channels)
-                s3d_out = s3d_out.permute(0, 2, 1).squeeze(0).cpu().numpy()
+                    s3d_out = s3d_model.features(s3d_in)
+                    #(batch, channels, time)
+                    s3d_out = torch.mean(s3d_out, dim=(3, 4))
+                    #FINAL (time, channels)
+                    s3d_out = s3d_out.permute(0, 2, 1).squeeze(0).cpu()
+                    s3d_frames.append(s3d_out)
 
+                s3d_out_full = torch.cat(s3d_frames, dim=0).numpy()
 
-            #save
+            #has the same name as original file but with .npz
+            output_file_name = os.path.join(output_pth, name.replace('.mp4', '.npz'))
+            np.savez_compressed(
+                output_file_name, 
+                clip=clip_out, 
+                s3d=s3d_out_full
+            )
     
     return 0
 
@@ -355,11 +373,12 @@ MAIN (select desired operations) ###############################################
 def main(): 
     #donwloading and processing
 #     download_data()
-    untar_data()
-    shard()
-    prep_data()
+#     untar_data()
+#     shard()
+#     prep_data()
 
     #create encodings
+    pre_encode_video()
 
 if __name__ == "__main__": 
     main()
