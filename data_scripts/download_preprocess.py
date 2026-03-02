@@ -311,8 +311,38 @@ def pre_encode_video():
 
         names = os.listdir(video_pth)
         for name in names: 
-            #load tensor
-            #process 
+            """
+            load tensor
+            -> (Time, H, W, channels)
+            -> normalize
+            -> (Time, Channels, H, W)
+            """
+            v_tensor, _, _ = torchvision.io.read_video(video_pth, pts_units="sec")
+            v_tensor = v_tensor.float() / 255.0
+            v_tensor = v_tensor.permute(0, 3, 1, 2)
+
+            #process CLIP
+            with torch.no_grad(): 
+                clip_in = clip_processor(images=v_tensor, return_tensor="pt").to(DEVICE)
+
+                clip_out = clip_model(**clip_in).image_embeds
+                #FINAL (time, 512)
+                clip_out = clip_out.cpu().numpy()
+
+            #process S3D
+            with torch.no_grad(): 
+                #(channels, time, h, w)
+                s3d_in = v_tensor.permute(1, 0, 2, 3)
+                #(batch, channels, time, h, w)
+                s3d_in = s3d_preprocess(s3d_in).unsqueeze(0).to(DEVICE)
+
+                s3d_out = s3d_model.features(s3d_in).
+                #(batch, channels, time)
+                s3d_out = torch.mean(s3d_out, dims=(3, 4))
+                #FINAL (time, channels)
+                s3d_out = s3d_out.permute(0, 2, 1).squeeze(0).cpu().numpy()
+
+
             #save
     
     return 0
