@@ -341,7 +341,9 @@ def pre_encode_audio():
                 )[0]
 
             # save
+            # (1, 9, 862) -> (Batch, K, L)
             dac_out = dac_features.cpu()
+            # (1, 1376, 768) -> (Batch, L, embed_dim)
             beats_out = beats_features.cpu()
             np.savez_compressed(
                 output_file_path,
