@@ -44,18 +44,21 @@ class AdaLNZero(torch.nn.Module):
         c -> (batch, c_dim)
         """
         conditions = self.adaln_mod(c)
-        #1d vectors (batch, embed_dim)
+        """
+        1d vectors (batch, seq_len, embed_dim)
+        each of these emebeddings are added token wise for temporal context
+        """
         a1, a2, b1, b2, g1, g2 = conditions.chunk(6, dim=2)
 
-        norm1 = self.layernorm1(x) * (1 + g1.unsqueeze(1)) + b1.unsqueeze(1)
+        norm1 = self.layernorm1(x) * (1 + g1) + b1
         atn, _ = self.atn(norm1, norm1, norm1)
-        gate1 = atn * a1.unsqueeze(1)
+        gate1 = atn * a1
 
         residual1 = gate1 + x
 
-        norm2 = self.layernorm2(residual1) * (1 + g2.unsqueeze(1)) + b2.unsqueeze(1)
+        norm2 = self.layernorm2(residual1) * (1 + g2) + b2
         ff = self.ff(norm2)
-        gate2 = ff * a2.unsqueeze(1)
+        gate2 = ff * a2
 
         residual2 = gate2 + residual1
 
@@ -146,7 +149,6 @@ class MaskVatAdaLN(torch.nn.Module):
             torch.nn.Linear(2 * s_dim, s_dim)
         )
 
-        # TODO: look into torch.nn.sequential multiple args
         adaln = [
             AdaLNZero(c_dim + s_dim, embed_dim, n_heads) for _ in range(M)
         ]
@@ -177,7 +179,7 @@ class MaskVatAdaLN(torch.nn.Module):
         s : s3d encodings
             -> (batch, seq_len, s_dim)
         """
-        #(batch embed_dim, seq_len)
+        #(batch, embed_dim, seq_len)
         mlp_out_c = self.c_mlp(c).permute(0, 2, 1)
         mlp_out_s = self.s_mlp(s).permute(0, 2, 1)
 
@@ -188,6 +190,8 @@ class MaskVatAdaLN(torch.nn.Module):
         interp_s = torch.nn.functional.interpolate(
             mlp_out_s, size=self.seq_len, mode='nearest-exact'
         ).permute(0, 2, 1)
+
+        #(batch, seq_len, 2 * embed_dim)
         conditions = torch.concat([interp_c, interp_s], dim=2)
 
         return conditions
@@ -202,8 +206,9 @@ class MaskVatAdaLN(torch.nn.Module):
         dac_embeddings = self.get_embeddings(d)
         conditions = self.make_conditioning(c, s)
 
-        DiT = self.backbone(dac_embeddings, conditions)
+        DiT, _ = self.backbone(dac_embeddings, conditions)
         linear = self.final_linear(DiT)
+        #(batch, seq_len, codebook * K) -> (batch, seq_len, K, codebook_size
         reshape = linear.reshape((-1, self.seq_len, self.K, self.codebook_size))
 
         return reshape
