@@ -1,20 +1,18 @@
 name: AudioVGen
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
-  - pytorch>=2.6.0
-  - torchvision
-  - av
-  - torchaudio
-  - pytorch-cuda=12.1
   - conda-forge::ffmpeg #may have a dependency error on installation
   - tqdm
-  - pip
   - transformers
+  - av 
+  - pip
   - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu121
     - huggingface_hub
     - descript-audio-codec
+    - torch>=2.6.0
+    - torchvision>=0.21.0
+    - torchaudio>=2.6.0
