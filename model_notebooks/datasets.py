@@ -3,12 +3,38 @@ import numpy as np
 
 import os
 from tqdm import tqdm
+import random 
+import math 
 
 
 PREENCODE_DIR = (
     "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video"
 )
 
+
+def apply_mask(dac_encodings, K, u, codebook_size, training): 
+    """
+    K layers => K unique masks, 1 per layer
+    1. draw from U(0, pi/2)
+    2. p = cos(u)
+    3. mask ~ bernoulli(p)
+    """
+    shape = dac_encodings.shape
+    p = math.cos(u) 
+    prob_tensor = torch.full(shape, p)
+    mask_tokens = torch.arange(0, K * codebook_size, 1024).reshape(1, 1, -1)
+    mask = torch.bernoulli(prob_tensor)
+
+    masked_encodings = torch.where(mask == 0, mask_tokens, dac_encodings)
+
+    #one hots
+    targets = torch.where(mask == 0, dac_encodings, 0)
+    targets = torch.nn.functional.one_hot(targets, num_classes=codebook_size)
+
+    return masked_encodings, targets
+
+def de_mask(predictions): 
+    pass
 
 class TrainDataset(Dataset):
     def __init__(self, root, with_beats=False):
