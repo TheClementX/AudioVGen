@@ -1,17 +1,17 @@
 # AudioVGen
 ## TODO
-I. Already done
-    - data processing scripts
-    - adalnzero model created
-    - datasets created 
-    - training mask function created
-    - psc applied
+### Already done
+* data processing scripts
+* adalnzero model created
+* datasets created 
+* training mask function created
+* psc applied
 
-II. Todo / Timeline (near future)
-    - inference demasking function 
-    - training loop / infrastructure
-    - update documentation
-    - brain storm research objectives
+### Todo / Timeline (near future)
+* inference demasking function 
+* training loop / infrastructure
+* update documentation
+* brain storm research objectives
 
 ## DOCUMENTATION: 
 I. Data 
