@@ -1,14 +1,19 @@
 # AudioVGen
-
+## TODO
 I. Already done
-    a. data processing scripts created. 
+    - data processing scripts
+    - adalnzero model created
+    - datasets created 
+    - training mask function created
+    - psc applied
 
 II. Todo / Timeline (near future)
-  implement data loaders
-  finish pre-encodidng script in download_preprocess.py
-  implement maskvat_adaln
+    - inference demasking function 
+    - training loop / infrastructure
+    - update documentation
+    - brain storm research objectives
 
-DOCUMENTATION: 
+## DOCUMENTATION: 
 I. Data 
     a. Our dataset (VGGSound): https://huggingface.co/datasets/Loie/VGGSound/tree/main
     b. Data Layout: our data follows a sharded data structure where every video is split into 
