@@ -1,5 +1,6 @@
 import torch
 import math
+import dac
 
 """
 implementation of DiT blocks Positional Encoding and MaskVat_adaln
@@ -212,3 +213,24 @@ class MaskVatAdaLN(torch.nn.Module):
         reshape = linear.reshape((-1, self.seq_len, self.K, self.codebook_size))
 
         return reshape
+
+    """
+    decode the DAC tensor into wav form
+    """    
+    def decode(predictions): 
+        """
+        predictions: (batch, seq_len, K, codebook_size)
+        """
+        codes = torch.argmax(predictions, dim=3)
+
+        dac_model_path = dac.utils.download(model_type="44khz")
+        dac_model = dac.DAC.load(dac_model_path)
+        dac_model.to("cuda")
+        dac_model.eval()
+
+        with torch.no_grad(): 
+            z, _, _ = dac_model.quantizer.from_codes(codes)
+            audio = dac_model.decode(z)
+
+        #(batch, channels, len)
+        return audio
