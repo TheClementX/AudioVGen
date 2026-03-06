@@ -4,12 +4,16 @@
 * data processing scripts
 * adalnzero model created
 * datasets created 
-* training mask function created
-* psc applied
+* training / inference mask functions created
+* metrics implemented
+* training notebook adaln_zero implemented
+* psc applied and accepted
 
 ### Todo / Timeline (near future)
-* inference demasking function 
-* training loop / infrastructure
+* verify and test metrics
+* verify and test masking
+* finish training pipeline
+* run dummy training run
 * update documentation
 * brain storm research objectives
 
