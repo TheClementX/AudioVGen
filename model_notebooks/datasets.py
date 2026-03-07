@@ -11,10 +11,7 @@ from torchaudio.functional import frechet_distance
 import torch.nn.functional as F
 import sys
 import dac
-
-#append VGGish dir
-sys.path.append(torch.hub.get_dir() + '/harritaylor_torchvggish_master')
-from vggish_input import waveform_to_examples
+from vggish.vggish_input import waveform_to_examples
 
 PREENCODE_DIR = (
     "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video"
