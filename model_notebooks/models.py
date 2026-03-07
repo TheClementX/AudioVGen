@@ -217,7 +217,7 @@ class MaskVatAdaLN(torch.nn.Module):
     """
     decode the DAC tensor into wav form
     """    
-    def decode(predictions): 
+    def decode(self, predictions): 
         """
         predictions: (batch, seq_len, K, codebook_size)
         """
