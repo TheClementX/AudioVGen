@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
-from datasets import training_mask, inference_mask
+from datasets import training_mask, inference_mask, Metrics
+from models import MaskVatAdaLN
 
 
 class AverageMeter:
@@ -134,11 +135,56 @@ def train_epoch(
     return loss_meter.avg
 
 
+@torch.no_grad()
 def valid_epoch(
-    model,
+    model: MaskVatAdaLN,
     dataloader,
     device,
-    criterion,
+    metrics: Metrics,
+    steps=5,
+    codebook_size=1024,
 ):
     # TODO: test with metrics
-    pass
+    model.eval()
+
+    distance_meter = AverageMeter()
+    waveclip_meter = AverageMeter()
+
+    progress = tqdm(
+        dataloader,
+        desc="Val (Cls)",
+        dynamic_ncols=True,
+        leave=False,
+    )
+
+    for encodings in progress:
+        # Move data to device
+        for i in range(len(encodings)):
+            encodings[i] = encodings[i].to(device, non_blocking=True)
+
+        dac_encoding, clip_encoding, s3d_encoding = encodings
+        masked_encodings = torch.full(dac_encoding.shape, codebook_size, device=device)
+
+        for step in range(steps):
+            # Forward pass (inference-only)
+            outputs = model(masked_encodings, clip_encoding, s3d_encoding)
+            masked_encodings = inference_mask(outputs, step, steps)
+
+        # Metrics
+        predictions = model.decode(masked_encodings)
+        targets = model.decode(dac_encoding)
+        results = metrics.get_metrics(
+            predictions, targets, clip_encoding, FDD=True, wave_clip=True
+        )
+        batch_distance = results["FDD"]
+        batch_waveclip = results["wave_clip"]
+        distance_meter.update(batch_distance)
+        waveclip_meter.update(batch_waveclip)
+
+        # Progress bar update
+        progress.set_postfix(
+            distance=f"{batch_distance:.4f} ({distance_meter.avg:.4f})",
+            waveclip=f"{batch_waveclip:.2f}% ({waveclip_meter.avg:.2f}%)",
+        )
+
+    return distance_meter.avg, waveclip_meter.avg
