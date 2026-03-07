@@ -469,13 +469,14 @@ MAIN (select desired operations) ###############################################
 # link all desired commands for processing
 def main():
     # donwloading and processing
-    #     download_data()
-    #     untar_data()
-    #     shard()
-    #     prep_data()
+    # download_data()
+    # untar_data()
+    # shard()
+    # prep_data()
 
     # create encodings
-    pre_encode_video()
+    # pre_encode_video()
+    # pre_encode_audio()
 
 
 if __name__ == "__main__":
