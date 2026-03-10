@@ -75,6 +75,8 @@ PREENCODE = False
 PREENCODE_DIR = (
     "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video"
 )
+MAX_FRAMES = 300
+MAX_SAMPLES = 441000
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
 else:
@@ -313,7 +315,7 @@ def pre_encode_audio():
     dac_model.eval()
 
     # load BEATs
-    beats_path = "./data_scripts/beats/BEATs_iter3_plus_AS2M.pt"
+    beats_path = "./beats/BEATs_iter3_plus_AS2M.pt"
     beats_checkpoint = torch.load(beats_path)
     cfg = BEATsConfig(beats_checkpoint["cfg"])
     beats_model = BEATs(cfg)
@@ -335,8 +337,11 @@ def pre_encode_audio():
             output_file_name = name.replace(".wav", ".npz")
             output_file_path = os.path.join(audio_encode_pth, output_file_name)
 
-            # load wav
+            # load wav and pad
             signal = AudioSignal(input_file_path).to_mono()
+            #automatic size checking
+            signal = signal.zero_pad_to(MAX_SAMPLES)
+            signal = signal.truncate_samples(MAX_SAMPLES) 
             signal.to("cuda")
             beats_input = signal.audio_data[0]
 
@@ -408,6 +413,18 @@ def pre_encode_video():
             v_tensor, _, _ = torchvision.io.read_video(video_name, pts_unit="sec")
             v_tensor = v_tensor.permute(0, 3, 1, 2)
 
+            #standardize length
+            if v_tensor.shape[0] > MAX_FRAMES: 
+                v_tensor = v_tensor[:MAX_FRAMES]
+
+            elif v_tensor.shape[0] < MAX_FRAMES:
+                difference = MAX_FRAMES - v_tensor.shape[0]
+
+                last_frame = v_tensor[-1].unsqueeze(0) # Keep shape (1, Channels, H, W)
+                padding = last_frame.repeat(difference, 1, 1, 1) # Clone it 'shortfall' times
+                
+                v_tensor = torch.cat([v_tensor, padding], dim=0)
+
             # process CLIP
             clip_frames = []
             clip_batch_size = 32
@@ -469,14 +486,14 @@ MAIN (select desired operations) ###############################################
 # link all desired commands for processing
 def main():
     # donwloading and processing
-    # download_data()
-    # untar_data()
-    # shard()
-    # prep_data()
+#     download_data()
+#     untar_data()
+#     shard()
+#     prep_data()
 
     # create encodings
-    # pre_encode_video()
-    # pre_encode_audio()
+    pre_encode_video()
+    pre_encode_audio()
 
 
 if __name__ == "__main__":

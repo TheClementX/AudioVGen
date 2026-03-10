@@ -359,7 +359,9 @@ def get_datasets(root, validation_ratio=0.05, with_beats=False):
             audio_file_path = os.path.join(audio_encode_pth, name)
             video_file_path = os.path.join(video_encode_pth, name)
 
-            data_paths.append((audio_file_path, video_file_path))
+            if os.path.exists(audio_file_path) and os.path.exists(video_file_path): 
+                data_paths.append((audio_file_path, video_file_path))
+            
 
     num_validation = math.ceil(len(data_paths) * validation_ratio)
     valid_dataset = AudioVideoDataset(data_paths[:num_validation], with_beats)
