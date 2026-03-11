@@ -103,7 +103,7 @@ def train_epoch(
         # Forward pass (mixed precision)
         with torch.amp.autocast(device_type="cuda"):
             outputs = model(masked_encodings, clip_encoding, s3d_encoding)
-            logits = outputs
+            logits = torch.permute(outputs, (0, 3, 1, 2))
             loss = criterion(logits, targets)
 
         # Backward + optimizer step (AMP-safe)
