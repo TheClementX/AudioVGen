@@ -33,6 +33,8 @@ from torchvision.models.video import s3d, S3D_Weights
 
 from beats.BEATs import BEATs, BEATsConfig
 
+import argparse
+
 """
 DOWNLOADING AND PREPROCESSING FLAGS
     -> downloading flags
@@ -51,7 +53,7 @@ if FULL_DOWNLOAD:
     TAR_FILES = [i for i in range(0, 20)]
 elif SELECT_DOWNLOAD:
     # set files you want to download as integers in [0, 20]
-    TAR_FILES = [0]
+    TAR_FILES = [0, 1, 2]
 
 # untar flags
 TAR_SOURCE_DIR = "./VGGSound_tar"
@@ -307,7 +309,7 @@ Must make an .npz file of DAC and BEATS encoding
 """
 
 
-def pre_encode_audio():
+def pre_encode_audio(dirs):
     # Load DAC
     dac_model_path = dac.utils.download(model_type="44khz")
     dac_model = dac.DAC.load(dac_model_path)
@@ -315,7 +317,7 @@ def pre_encode_audio():
     dac_model.eval()
 
     # load BEATs
-    beats_path = "./beats/BEATs_iter3_plus_AS2M.pt"
+    beats_path = "./data_scripts/beats/BEATs_iter3_plus_AS2M.pt"
     beats_checkpoint = torch.load(beats_path)
     cfg = BEATsConfig(beats_checkpoint["cfg"])
     beats_model = BEATs(cfg)
@@ -324,18 +326,21 @@ def pre_encode_audio():
     beats_model.eval()
 
     # encode
-    dirs = os.listdir(PREENCODE_DIR)
-    for dir in dirs:
+    # dirs = os.listdir(PREENCODE_DIR)
+    for dir in tqdm(dirs, desc="Pre-encoding shard dirs"):
         audio_pth = os.path.join(PREENCODE_DIR, dir, "audio")
         audio_encode_pth = os.path.join(PREENCODE_DIR, dir, "audio_encode")
         if not os.path.exists(audio_encode_pth):
             os.mkdir(audio_encode_pth)
 
         names = os.listdir(audio_pth)
-        for name in tqdm(names):
+        for name in tqdm(names, desc=f"Encoding {dir} Files", leave=False):
             input_file_path = os.path.join(audio_pth, name)
             output_file_name = name.replace(".wav", ".npz")
             output_file_path = os.path.join(audio_encode_pth, output_file_name)
+
+            if os.path.exists(output_file_path):
+                continue
 
             # load wav and pad
             signal = AudioSignal(input_file_path).to_mono()
@@ -377,7 +382,7 @@ must make a .npz file of CLIP and S3D encodings
 """
 
 
-def pre_encode_video():
+def pre_encode_video(dirs):
     # load S3D
     s3d_weights = S3D_Weights.KINETICS400_V1
     s3d_model = s3d(weights=s3d_weights).to(DEVICE)
@@ -392,7 +397,8 @@ def pre_encode_video():
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
     # enumerate shard dirs
-    shard_dirs = os.listdir(PREENCODE_DIR)
+    # shard_dirs = os.listdir(PREENCODE_DIR)
+    shard_dirs = dirs
     for dir in tqdm(shard_dirs, desc="Pre-encoding shard dirs"):
         video_pth = os.path.join(PREENCODE_DIR, dir, "video")
         output_pth = os.path.join(PREENCODE_DIR, dir, "video_encode")
@@ -410,6 +416,10 @@ def pre_encode_video():
             -> (Time, Channels, H, W)
             """
             video_name = os.path.join(video_pth, name)
+            output_file_name = os.path.join(output_pth, name.replace(".mp4", ".npz"))
+            if os.path.exists(output_file_name):
+                continue
+
             v_tensor, _, _ = torchvision.io.read_video(video_name, pts_unit="sec")
             v_tensor = v_tensor.permute(0, 3, 1, 2)
 
@@ -472,7 +482,6 @@ def pre_encode_video():
                 s3d_out_full = torch.cat(s3d_frames, dim=0).numpy()
 
             # has the same name as original file but with .npz
-            output_file_name = os.path.join(output_pth, name.replace(".mp4", ".npz"))
             np.savez_compressed(output_file_name, clip=clip_out, s3d=s3d_out_full)
 
     return 0
@@ -486,14 +495,20 @@ MAIN (select desired operations) ###############################################
 # link all desired commands for processing
 def main():
     # donwloading and processing
-#     download_data()
-#     untar_data()
-#     shard()
-#     prep_data()
+    # download_data()
+    # untar_data()
+    # shard()
+    # prep_data()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("dir")
+    args = parser.parse_args()
+
+    dirs = [args.dir]
 
     # create encodings
-    pre_encode_video()
-    pre_encode_audio()
+    pre_encode_video(dirs)
+    pre_encode_audio(dirs)
 
 
 if __name__ == "__main__":

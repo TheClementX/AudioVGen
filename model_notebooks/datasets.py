@@ -102,25 +102,34 @@ class Metrics:
         -> SparseSync: mean of offset (not used)
     """
 
-    def __init__(self):
+    def __init__(self, model_metrics=False):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.resampler = torchaudio.transforms.Resample(
             orig_freq=44100, new_freq=16000
         ).to(self.device)
 
-        # load wav2clip
-        self.wav2clip_model = wav2clip.get_model()
-        self.wav2clip_model.eval()
+        n_mfcc = 64
+        self.mfcc_transform = torchaudio.transforms.MFCC(
+            n_mfcc=n_mfcc,
+            sample_rate=44100,
+            melkwargs={"n_mels": 128, "win_length": 2048, "hop_length": 512, "n_fft": 2048},
+        ).to(self.device)
 
-        # load vggish
-        self.vggish_model = torch.hub.load("harritaylor/torchvggish", "vggish")
-        self.vggish_model.eval()
+        self.model_metrics = model_metrics
+        if self.model_metrics:
+            # load wav2clip
+            self.wav2clip_model = wav2clip.get_model()
+            self.wav2clip_model.eval()
 
-        # load DAC
-        dac_model_path = dac.utils.download(model_type="44khz")
-        self.dac_model = dac.DAC.load(dac_model_path)
-        self.dac_model.to("cuda")
-        self.dac_model.eval()
+            # load vggish
+            self.vggish_model = torch.hub.load("harritaylor/torchvggish", "vggish")
+            self.vggish_model.eval()
+
+            # load DAC
+            dac_model_path = dac.utils.download(model_type="44khz")
+            self.dac_model = dac.DAC.load(dac_model_path)
+            self.dac_model.to("cuda")
+            self.dac_model.eval()
 
     # (batch, seq_len, embed_dim)
     # could be numerically unstable
@@ -178,15 +187,8 @@ class Metrics:
     """
 
     def FDM(self, prediction, target):
-        n_mfcc = 64
-        mfcc_transform = torchaudio.transforms.MFCC(
-            n_mfcc=n_mfcc,
-            sample_rate=44100,
-            melkwargs={"n_mels": 128, "win_length": 2048, "hop_length": 512},
-        )
-
-        mfcc_pred = mfcc_transform(prediction).permute(0, 2, 1)
-        mfcc_tar = mfcc_transform(target).permute(0, 2, 1)
+        mfcc_pred = self.mfcc_transform(prediction).squeeze(1).permute(0, 2, 1)
+        mfcc_tar = self.mfcc_transform(target).squeeze(1).permute(0, 2, 1)
 
         return self.embed_avg_frechet_distance(mfcc_pred, mfcc_tar)
 
@@ -308,17 +310,17 @@ class Metrics:
         results = dict()
         if avg_cosine_similarity:
             results["cos"] = self.wav_avg_cos_sim(predictions, targets)
-        if FAD:
+        if FAD and self.model_metrics:
             results["FAD"] = self.FAD(predictions, targets)
         if FDM:
             results["FDM"] = self.FDM(predictions, targets)
-        if FDD:
+        if FDD and self.model_metrics:
             results["FDD"] = self.FDD(predictions, targets)
-        if wave_clip:
+        if wave_clip and self.model_metrics:
             results["wave_clip"] = self.wave_clip(predictions, targets)
-        if cycle_clip:
+        if cycle_clip and self.model_metrics:
             results["cycle_clip"] = self.cycle_clip(predictions, clip)
-        if novelty:
+        if novelty and self.model_metrics:
             results["NS"] = self.novelty_score(predictions, targets)
 
         return results
@@ -336,6 +338,16 @@ class AudioVideoDataset(Dataset):
         audio_file_path, video_file_path = self.data_paths[index]
         audio_encoding = np.load(audio_file_path)
         video_encoding = np.load(video_file_path)
+
+        # dac = audio_encoding["dac"]
+        # clip = video_encoding["clip"]
+        # s3d = video_encoding["s3d"]
+
+        # if np.isnan(dac).any() or np.isnan(clip).any() or np.isnan(s3d).any():
+        #     print(audio_file_path, video_file_path)
+
+        # if np.isinf(dac).any() or np.isinf(clip).any() or np.isinf(s3d).any():
+        #     print(audio_file_path, video_file_path)
 
         ret_list = [
             audio_encoding["dac"],

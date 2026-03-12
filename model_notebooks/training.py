@@ -3,6 +3,7 @@ from tqdm import tqdm
 from datasets import training_mask, inference_mask, Metrics
 from models import MaskVatAdaLN
 
+import numpy as np
 
 class AverageMeter:
     """
@@ -106,13 +107,17 @@ def train_epoch(
             logits = torch.permute(outputs, (0, 3, 1, 2))
             loss = criterion(logits, targets)
 
+        batch_loss = loss.item()
+        if np.isnan(batch_loss).any() or np.isinf(batch_loss).any():
+            continue
+
         # Backward + optimizer step (AMP-safe)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
         # Metrics
-        batch_loss = loss.item()
+
         loss_meter.update(batch_loss)
 
         # TODO: maybe use topk cosine similarity as extra metric
@@ -148,7 +153,7 @@ def valid_epoch(
     model.eval()
 
     distance_meter = AverageMeter()
-    waveclip_meter = AverageMeter()
+    # waveclip_meter = AverageMeter()
 
     progress = tqdm(
         dataloader,
@@ -174,17 +179,17 @@ def valid_epoch(
         predictions = model.decode(masked_encodings)
         targets = model.decode(dac_encoding)
         results = metrics.get_metrics(
-            predictions, targets, clip_encoding, FDD=True, wave_clip=True
+            predictions, targets, clip_encoding, FDM=True
         )
-        batch_distance = results["FDD"]
-        batch_waveclip = results["wave_clip"]
-        distance_meter.update(batch_distance)
-        waveclip_meter.update(batch_waveclip)
+        batch_fdm = results["FDM"]
+        # batch_cos = results["cos"]
+        distance_meter.update(batch_fdm)
+        # waveclip_meter.update(batch_cos)
 
         # Progress bar update
         progress.set_postfix(
-            distance=f"{batch_distance:.4f} ({distance_meter.avg:.4f})",
-            waveclip=f"{batch_waveclip:.2f}% ({waveclip_meter.avg:.2f}%)",
+            distance=f"{batch_fdm:.4f} ({distance_meter.avg:.4f})",
+            # waveclip=f"{batch_cos:.2f}% ({waveclip_meter.avg:.2f}%)",
         )
 
-    return distance_meter.avg, waveclip_meter.avg
+    return distance_meter.avg # , waveclip_meter.avg
