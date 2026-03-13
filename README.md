@@ -9,13 +9,18 @@
 * training notebook adaln_zero implemented
 * psc applied and accepted
 * training pipeline created
+* code tested with succesful training run
+* midterm report written and submitted
 
 ### Todo / Timeline (near future)
-* wait on psc do give resources
-* test all code with psc resources
-* run dummy training run
-* update documentation
-* brain storm research objectives
+* download and preprocess the rest of the dataset
+* refine initial diffusion architecture
+* train DiT to exceptional accuracy
+* finish remaining validation metrics
+* study SSMs and Mamba architecture / repo
+* ideate, implement, train, validate, hybrid mamba model
+* investigate mamba architecture to improve upon SSM model
+
 
 ## DOCUMENTATION: 
 ### Data 
