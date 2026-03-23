@@ -4,3 +4,4 @@ VGGSound_raw_data
 __pycache__
 BEATs_iter3_plus_AS2M.pt
 checkpoints
+wandb
