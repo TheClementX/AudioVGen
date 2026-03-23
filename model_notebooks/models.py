@@ -135,6 +135,8 @@ class MaskVatAdaLN(torch.nn.Module):
         self.register_buffer("embed_offset", embed_offset)
 
         self.embedding = torch.nn.Embedding(num_embeddings, embed_dim)
+        self.pose_dac = PositionalEncoding(self.seq_len, self.embed_dim)
+        self.pose_conditions = PositionalEncoding(self.seq_len, c_dim + s_dim)
 
         # clip mlp
         self.c_mlp = torch.nn.Sequential(
@@ -171,6 +173,7 @@ class MaskVatAdaLN(torch.nn.Module):
         e = self.embedding(offset_embeds)
         # print(torch.max(e))
         e = torch.sum(e, dim=2)
+        e = self.pose_dac(e)
 
         return e
 
@@ -195,6 +198,7 @@ class MaskVatAdaLN(torch.nn.Module):
 
         # (batch, seq_len, 2 * embed_dim)
         conditions = torch.concat([interp_c, interp_s], dim=2)
+        conditions = self.pose_conditions(conditions)
 
         return conditions
 
