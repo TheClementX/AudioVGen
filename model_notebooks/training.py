@@ -113,6 +113,9 @@ def train_epoch(
 
         # Backward + optimizer step (AMP-safe)
         scaler.scale(loss).backward()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
         scaler.step(optimizer)
         scaler.update()
 

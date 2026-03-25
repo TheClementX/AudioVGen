@@ -44,7 +44,7 @@ train_loader = DataLoader(
     num_workers=5,
     batch_size=config["batch_size"],
     pin_memory=True,
-    # shuffle=True,
+    shuffle=True,
 )
 valid_loader = DataLoader(
     dataset=valid_dataset,
@@ -93,7 +93,7 @@ run_name = "midterm_run"
 
 run = wandb.init(
     name = run_name,
-    entry = "AudioVGen",
+    entity = "AudioVGen",
     project = "AudioVGen_plots",
     config = config,
 )
