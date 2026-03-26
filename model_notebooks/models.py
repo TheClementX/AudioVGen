@@ -72,7 +72,7 @@ class PositionalEncoding(torch.nn.Module):
         pe_matrix = torch.zeros((seq_len, embed_dim))
 
         # (1, seq_len)
-        pos = torch.arange(0, seq_len, dtype=torch.float()).unsqueeze(1)
+        pos = torch.arange(0, seq_len, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim)
         )
@@ -126,6 +126,12 @@ class MaskVatAdaLN(torch.nn.Module):
         self.K = K
         self.seq_len = seq_len
         self.codebook_size = codebook_size
+
+        #load DAC
+        dac_model_path = dac.utils.download(model_type="44khz")
+        self.dac_model = dac.DAC.load(dac_model_path)
+        self.dac_model.to("cuda")
+        self.dac_model.eval()
 
         num_embeddings = codebook_size * K + K
         # (batch, 1, K)
@@ -229,14 +235,11 @@ class MaskVatAdaLN(torch.nn.Module):
         # print(predictions.shape)
         codes = torch.permute(predictions, (0, 2, 1))
 
-        dac_model_path = dac.utils.download(model_type="44khz")
-        dac_model = dac.DAC.load(dac_model_path)
-        dac_model.to("cuda")
-        dac_model.eval()
-
         with torch.no_grad():
-            z, _, _ = dac_model.quantizer.from_codes(codes)
-            audio = dac_model.decode(z)
+            z, _, _ = self.dac_model.quantizer.from_codes(codes)
+            audio = self.dac_model.decode(z)
 
         # (batch, channels, len)
         return audio
+
+

@@ -384,3 +384,33 @@ def get_datasets(root, validation_ratio=0.05, with_beats=False):
     train_dataset = AudioVideoDataset(data_paths[num_validation:])
 
     return train_dataset, valid_dataset
+
+def verify_datasets(root): 
+    train_d, valid_d =  get_datasets(root, validation_ratio=1.0, with_beats=False)
+
+    prev_dac, prev_clip, prev_s3d = None, None, None
+    for encoding, i in tqdm(enumerate(train_d)): 
+        dac, clip, s3d = encoding 
+        if i == 0: 
+            prev_dac, prev_clip, prev_s3d = dac.shape, clip.shape, s3d.shape
+            print(f'dac_shape : {prev_dac} clip_shape : {prev_clip} s3d_shape : {prev_s3d}')
+
+        else: 
+            #check dac
+            if dac.shape != prev_dac: 
+                print(f"DAC anomaly prev_shape = {prev_dac}, cur_shape = {dac.shape}")
+            else: 
+                prev_dac = dac.shape
+            #check clip
+
+            if clip.shape != prev_clip: 
+                print(f"CLIP anomaly prev_shape = {prev_clip}, cur_shape = {clip.shape}")
+            else:
+                prev_clip = clip.shape
+
+            #check s3d
+            if s3d.shape != prev_s3d: 
+                print(f"S3D anomaly prev_shape = {prev_s3d}, cur_shape = {s3d.shape}")
+            else:
+                prev_s3d = s3d.shape
+

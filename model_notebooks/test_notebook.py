@@ -3,6 +3,7 @@ from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
 import wandb
+import gc
 
 import os
 
@@ -20,18 +21,18 @@ print("Device: ", DEVICE)
 
 config = {
     "seq_len": 862,  # seq_len of DAC encoding
-    "embed_dim": 512,  # embed_dim for the model
-    "n_heads": 8,  # number of heads for multiheaded attention
+    "embed_dim": 1024,  # embed_dim for the model
+    "n_heads": 16,  # number of heads for multiheaded attention
     "c_dim": 512,  # dimensions of clip encoding
     "s_dim": 1024,  # dimensions of s3d encoding
-    "M": 12,  # number of AdaLN Blocks in the model
+    "M": 18,  # number of AdaLN Blocks in the model
     "K": 9,  # dimensions of DAC encoding
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
     "lr": 0.001,
-    "epochs": 50,
+    "epochs": 100,
     "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
-    "batch_size": 32,  # batch size for training
+    "batch_size": 16,  # batch size for training
     "checkpoint_dir": "./checkpoints",
 }
 
@@ -87,9 +88,9 @@ scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, config["epochs"])
 # Mixed-Precision Training
 scaler = torch.amp.GradScaler(device="cuda")
 
-wandb.login(key="<INSERT KEY HERE>")
+wandb.login(key="")
 
-run_name = "midterm_run"
+run_name = "full_run"
 
 run = wandb.init(
     name = run_name,
@@ -164,6 +165,9 @@ best_distance = np.inf
 eval_cls = True
 
 inference_metrics = Metrics()
+
+gc.collect()
+torch.cuda.empty_cache()
 
 # torch.autograd.set_detect_anomaly(True)
 for epoch in range(start_epoch, config["epochs"]):

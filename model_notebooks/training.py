@@ -114,6 +114,7 @@ def train_epoch(
         # Backward + optimizer step (AMP-safe)
         scaler.scale(loss).backward()
 
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         scaler.step(optimizer)
@@ -128,11 +129,16 @@ def train_epoch(
         #     batch_acc = topk_accuracy(logits, dac_encoding, topk=(1,))[0].item()
         #     acc_meter.update(batch_acc)
 
+        #track memory usage
+        current_mem = torch.cuda.memory_allocated() / (1024 ** 3) # Convert to GB
+        peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        
         # Progress bar update
         progress.set_postfix(
             loss=f"{batch_loss:.4f} ({loss_meter.avg:.4f})",
             # acc=f"{batch_acc:.2f}% ({acc_meter.avg:.2f}%)",
             lr=f"{optimizer.param_groups[0]['lr']:.6f}",
+            mem=f"{current_mem:.1f}GB (Peak: {peak_mem:.1f}GB)"
         )
 
     # Step scheduler once per epoch (for epoch-based schedulers)
@@ -149,7 +155,7 @@ def valid_epoch(
     dataloader,
     device,
     metrics: Metrics,
-    steps=5,
+    steps=20,
     codebook_size=1024,
 ):
     # TODO: test with metrics
