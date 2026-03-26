@@ -18,8 +18,10 @@ PREENCODE_DIR = (
 )
 
 
+#batched
 def training_mask(dac_encodings, codebook_size):
     """
+    (batch, seq_len, layers) = (batch, 862, 9)
     K layers => K unique mask tokens, 1 per layer
     1. draw from U(0, pi/2)
     2. p = cos(u)
@@ -28,20 +30,19 @@ def training_mask(dac_encodings, codebook_size):
     could impact training
     """
     dac_device = dac_encodings.device
-    K = dac_encodings.shape[2]
+    batch, seq_len, K = dac_encodings.shape
 
-    u = random.uniform(0, math.pi / 2)
+    eps = 1e-8
+    #generate unique probability for each batch
+    u = torch.rand((batch, 1, 1), device=dac_device) * (math.pi / 2 - 2 * eps) + eps
+    p = torch.cos(u)
 
-    shape = dac_encodings.shape
-    p = math.cos(u)
-
-    prob_tensor = torch.full(shape, p, device=dac_device)
-    # mask_tokens = torch.arange(
-    #     codebook_size, K * codebook_size + 1, codebook_size,
-    #     device=dac_device
-    # ).reshape(1, 1, -1).to(dac_device)
+    #generate mask tensor
+    prob_tensor = p.expand(-1, seq_len, 1)
     mask_tokens = codebook_size
     mask = torch.bernoulli(prob_tensor)
+    #duplicate masks across K layers
+    mask = mask.expand(-1, -1, K)
 
     # mask encodings for forward pass
     masked_encodings = torch.where(mask == 0, mask_tokens, dac_encodings)
@@ -53,32 +54,39 @@ def training_mask(dac_encodings, codebook_size):
     return masked_encodings, targets
 
 
-def inference_mask(predictions, cur_step, max_steps):
+def inference_mask(predictions, cur_step, max_steps, temperature=1.0):
     """
     takes raw predictions
         -> predictions : (batch, seq_len, K, codebook_size)
         -> cos(cur_step/max_steps * math.pi/2)
     """
-    _, _, K, codebook_size = predictions.shape
+    batch, seq_len, K, codebook_size = predictions.shape
+
+    #determine what percentage of sequence to unmask
     c = (cur_step + 1) / max_steps
     cur_percentage = 1 - math.cos(c * math.pi / 2)
 
-    # (batch, seq_len, K)
-    tokens = torch.argmax(predictions, dim=3)
-    confidences = torch.max(predictions, dim=3).values
-    # mask_tokens = torch.arange(
-    #     codebook_size, K * codebook_size + 1, codebook_size, device=pred_device
-    # ).reshape(1, 1, -1)
-    mask_tokens = codebook_size
+    probs = F.softmax(predictions / temperature, dim=-1)
+    #average probabilities over the layers 
 
-    # (batch, seq_len * K)
-    flat_confidences = torch.flatten(confidences, start_dim=1)
-    k = math.ceil(flat_confidences.shape[1] * cur_percentage)
-    _, top_k_indices = torch.topk(flat_confidences, k, dim=1)
+    #sample tokens using a mutlinomial distribution
+    flat_probs = probs.reshape(-1, codebook_size)
+    tokens = torch.multinomial(flat_probs, num_samples=1)
+    tokens = tokens.reshape(batch, seq_len, K)
 
-    mask = torch.zeros_like(flat_confidences)
+    # (batch, seq_len)
+    confidences = torch.max(probs, dim=-1).values
+    temporal_confidences = torch.mean(confidences, dim=-1)
+
+    #get topk positions temporally
+    k = math.ceil(temporal_confidences.shape[1] * cur_percentage)
+    _, top_k_indices = torch.topk(temporal_confidences, k, dim=1)
+
+    mask = torch.zeros_like(temporal_confidences)
     mask.scatter_(1, top_k_indices, 1)
-    mask = mask.reshape(tokens.shape)
+
+    mask = mask.unsqueeze(-1).expand(-1, -1, K)
+    mask_tokens = codebook_size
 
     unmasked = torch.where(mask.bool(), tokens, mask_tokens)
 
@@ -122,7 +130,7 @@ class Metrics:
             self.wav2clip_model.eval()
 
             # load vggish
-            self.vggish_model = torch.hub.load("harritaylor/torchvggish", "vggish")
+            self.vggish_model = torch.hub.load("harritaylor/torchvggish", "vggish", preprocess=False)
             self.vggish_model.eval()
 
             # load DAC
@@ -133,10 +141,10 @@ class Metrics:
 
     # (batch, seq_len, embed_dim)
     # could be numerically unstable
-    def embed_avg_frechet_distance(self, prediction, target):
+    def embed_avg_frechet_distance(self, prediction, target, eps=1e-6):
         # (batch * seq_len, embed_dim) basically one long sequence
-        predictions = prediction.reshape(-1, prediction.shape[2])
-        targets = target.reshape(-1, target.shape[2])
+        predictions = prediction.reshape(-1, prediction.shape[-1]).double()
+        targets = target.reshape(-1, target.shape[-1]).double()
 
         mu_p = torch.mean(predictions, dim=0)
         mu_t = torch.mean(targets, dim=0)
@@ -144,16 +152,21 @@ class Metrics:
         sigma_p = torch.cov(predictions.T)
         sigma_t = torch.cov(targets.T)
 
+        sigma_p += eps * torch.eye(sigma_p.shape[0], dtype=sigma_p.dtype, device=sigma_p.device)
+        sigma_t += eps * torch.eye(sigma_t.shape[0], dtype=sigma_t.dtype, device=sigma_t.device)
+
         distances = frechet_distance(mu_p, sigma_p, mu_t, sigma_t)
         return distances.item()
 
     """
     frechet distance VGGish
-    assume (batch, len)
+    assume (batch, 1, audio_len)
     """
 
     def FAD(self, prediction, target):
 
+        prediction = prediction.squeeze(1)
+        target = target.squeeze(1)
         batch = prediction.shape[0]
 
         pred_resample = self.resampler(prediction)
@@ -162,8 +175,8 @@ class Metrics:
         pred_batch_embeds = []
         tar_batch_embeds = []
         for b in range(batch):
-            pred_audio = pred_resample[b].numpy()
-            tar_audio = tar_resample[b].numpy()
+            pred_audio = pred_resample[b].cpu().numpy()
+            tar_audio = tar_resample[b].cpu().numpy()
 
             pred_mel = waveform_to_examples(pred_audio, 16000)
             pred_tensor = torch.from_numpy(pred_mel).float()
@@ -176,17 +189,19 @@ class Metrics:
                 tar_embed = self.vggish_model(tar_tensor)
                 tar_batch_embeds.append(tar_embed)
 
-        generated_embed = torch.concat(pred_batch_embeds, dim=0)
-        target_embed = torch.concat(tar_batch_embeds, dim=0)
+        generated_embed = torch.concat(pred_batch_embeds, dim=0).unsqueeze(0)
+        target_embed = torch.concat(tar_batch_embeds, dim=0).unsqueeze(0)
 
         return self.embed_avg_frechet_distance(generated_embed, target_embed)
 
     """
     frechet distance MFCC
-    assume (batch, len)
+    assume (batch, 1, audio_len)
     """
 
     def FDM(self, prediction, target):
+        prediction = prediction.squeeze(1)
+        target = target.squeeze(1)
         mfcc_pred = self.mfcc_transform(prediction).squeeze(1).permute(0, 2, 1)
         mfcc_tar = self.mfcc_transform(target).squeeze(1).permute(0, 2, 1)
 
@@ -194,7 +209,7 @@ class Metrics:
 
     """
     frechet distance DAC
-    assume (batch, channel, len)
+    assume (batch, 1, audio_len)
     """
 
     def FDD(self, prediction, target):
@@ -202,7 +217,7 @@ class Metrics:
         pred_signal = self.dac_model.preprocess(prediction, 44100)
         tar_signal = self.dac_model.preprocess(target, 44100)
 
-        # get embeddings
+        # get embeddings (seem to be unormalized continous embeddings)
         target_embed = self.dac_model.encode(tar_signal)[0]
         generated_embed = self.dac_model.encode(pred_signal)[0]
 
@@ -212,6 +227,8 @@ class Metrics:
         return self.embed_avg_frechet_distance(generated_embed, target_embed)
 
     def wav_avg_cos_sim(self, prediction, target):
+        prediction = prediction.squeeze(1)
+        target = target.squeeze(1)
         sim = torch.nn.functional.cosine_similarity(target, prediction, dim=1)
         avg_sim = torch.mean(sim, dim=0)
 
@@ -229,6 +246,7 @@ class Metrics:
         """
         wcs = []
         predictions = predictions.squeeze(1)
+        targets = targets.squeeze(1)
         batch, _ = predictions.shape
         # Load model
         wav2clip_model = self.wav2clip_model
@@ -288,8 +306,8 @@ class Metrics:
         return corr.mean()
 
     """
-    Takes in a tensor (batch, len)
-        -> audio should be mono and have n channel dimension
+    Takes in a tensor (batch, 1, audio_len)
+        -> audio should be mono
         -> audio is 44.1khz
     """
 
@@ -306,8 +324,16 @@ class Metrics:
         cycle_clip=False,
         novelty=False,
     ):
+    """
+    predictions, targets : raw waveforms, embeddings are calculated on the fly
+    """
 
         results = dict()
+        """
+        -> cos similarity is bad due to phase issues on raw audio.
+        -> Use cos similarity on embeddings if anything
+        -> make frechet distance computed batchwise instead of example wise
+        """
         if avg_cosine_similarity:
             results["cos"] = self.wav_avg_cos_sim(predictions, targets)
         if FAD and self.model_metrics:
@@ -386,10 +412,10 @@ def get_datasets(root, validation_ratio=0.05, with_beats=False):
     return train_dataset, valid_dataset
 
 def verify_datasets(root): 
-    train_d, valid_d =  get_datasets(root, validation_ratio=1.0, with_beats=False)
+    train_d, valid_d =  get_datasets(root, validation_ratio=0.0, with_beats=False)
 
     prev_dac, prev_clip, prev_s3d = None, None, None
-    for encoding, i in tqdm(enumerate(train_d)): 
+    for i, encoding in tqdm(enumerate(train_d)): 
         dac, clip, s3d = encoding 
         if i == 0: 
             prev_dac, prev_clip, prev_s3d = dac.shape, clip.shape, s3d.shape
@@ -414,3 +440,6 @@ def verify_datasets(root):
             else:
                 prev_s3d = s3d.shape
 
+#verify dataset
+if __name__ == "__main__": 
+    verify_datasets(PREENCODE_DIR)

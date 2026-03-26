@@ -21,16 +21,16 @@ print("Device: ", DEVICE)
 
 config = {
     "seq_len": 862,  # seq_len of DAC encoding
-    "embed_dim": 1024,  # embed_dim for the model
+    "embed_dim": 512,  # embed_dim for the model
     "n_heads": 16,  # number of heads for multiheaded attention
     "c_dim": 512,  # dimensions of clip encoding
     "s_dim": 1024,  # dimensions of s3d encoding
-    "M": 18,  # number of AdaLN Blocks in the model
+    "M": 12,  # number of AdaLN Blocks in the model
     "K": 9,  # dimensions of DAC encoding
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
-    "lr": 0.001,
-    "epochs": 100,
+    "lr": 0.0001,
+    "epochs": 50,
     "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
     "batch_size": 16,  # batch size for training
     "checkpoint_dir": "./checkpoints",
@@ -83,14 +83,19 @@ optimizer = optim.AdamW(
 )
 
 # Scheduler
-scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, config["epochs"])
+scheduler = optim.lr_scheduler.OneCycleLR(
+    optimizer, 
+    max_lr=config['lr'], 
+    epochs=config["epochs"],
+    steps_per_epoch=len(train_loader)
+)
 
 # Mixed-Precision Training
 scaler = torch.amp.GradScaler(device="cuda")
 
 wandb.login(key="")
 
-run_name = "full_run"
+run_name = "inference_mask_correct"
 
 run = wandb.init(
     name = run_name,

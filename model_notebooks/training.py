@@ -1,4 +1,5 @@
 import torch
+import math
 from tqdm import tqdm
 from datasets import training_mask, inference_mask, Metrics
 from models import MaskVatAdaLN
@@ -94,11 +95,13 @@ def train_epoch(
     for encodings in progress:
         optimizer.zero_grad(set_to_none=True)
 
-        # Move data to device
-        for i in range(len(encodings)):
-            encodings[i] = encodings[i].to(device, non_blocking=True)
-
+        #unpack encoding
         dac_encoding, clip_encoding, s3d_encoding = encodings
+        #change device
+        dac_encoding = dac_encoding.to(device)
+        clip_encoding = clip_encoding.to(device)
+        s3d_encoding = s3d_encoding.to(device)
+
         masked_encodings, targets = training_mask(dac_encoding, codebooks_size)
 
         # Forward pass (mixed precision)
@@ -108,8 +111,6 @@ def train_epoch(
             loss = criterion(logits, targets)
 
         batch_loss = loss.item()
-        if np.isnan(batch_loss).any() or np.isinf(batch_loss).any():
-            continue
 
         # Backward + optimizer step (AMP-safe)
         scaler.scale(loss).backward()
@@ -122,7 +123,8 @@ def train_epoch(
 
         # Metrics
 
-        loss_meter.update(batch_loss)
+        if not math.isnan(batch_loss) and not math.isinf(batch_loss):
+            loss_meter.update(batch_loss)
 
         # TODO: maybe use topk cosine similarity as extra metric
         # with torch.no_grad():
@@ -141,9 +143,9 @@ def train_epoch(
             mem=f"{current_mem:.1f}GB (Peak: {peak_mem:.1f}GB)"
         )
 
-    # Step scheduler once per epoch (for epoch-based schedulers)
-    if scheduler is not None:
-        scheduler.step()
+        #Step scheduler once per batch
+        if scheduler is not None:
+            scheduler.step()
 
     # return acc_meter.avg, loss_meter.avg
     return loss_meter.avg
@@ -155,7 +157,7 @@ def valid_epoch(
     dataloader,
     device,
     metrics: Metrics,
-    steps=20,
+    steps=15,
     codebook_size=1024,
 ):
     # TODO: test with metrics
@@ -173,10 +175,14 @@ def valid_epoch(
 
     for encodings in progress:
         # Move data to device
-        for i in range(len(encodings)):
-            encodings[i] = encodings[i].to(device, non_blocking=True)
 
+        #unpack encoding
         dac_encoding, clip_encoding, s3d_encoding = encodings
+        #change device
+        dac_encoding = dac_encoding.to(device)
+        clip_encoding = clip_encoding.to(device)
+        s3d_encoding = s3d_encoding.to(device)
+
         masked_encodings = torch.full(dac_encoding.shape, codebook_size, device=device)
 
         for step in range(steps):
