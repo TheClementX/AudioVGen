@@ -64,6 +64,8 @@ def train_epoch(
     device,
     criterion,
     codebooks_size=1024,
+    distributed=False, 
+    rank=0
 ):
     """
     Runs one training epoch.
@@ -98,9 +100,9 @@ def train_epoch(
         #unpack encoding
         dac_encoding, clip_encoding, s3d_encoding = encodings
         #change device
-        dac_encoding = dac_encoding.to(device)
-        clip_encoding = clip_encoding.to(device)
-        s3d_encoding = s3d_encoding.to(device)
+        dac_encoding = dac_encoding.to(rank if distributed else device)
+        clip_encoding = clip_encoding.to(rank if distributed else device)
+        s3d_encoding = s3d_encoding.to(rank if distributed else device)
 
         masked_encodings, targets = training_mask(dac_encoding, codebooks_size)
 
@@ -159,12 +161,10 @@ def valid_epoch(
     metrics: Metrics,
     steps=15,
     codebook_size=1024,
+    distributed=False, 
+    rank=0
 ):
-    # TODO: test with metrics
     model.eval()
-
-    distance_meter = AverageMeter()
-    # waveclip_meter = AverageMeter()
 
     progress = tqdm(
         dataloader,
@@ -173,38 +173,52 @@ def valid_epoch(
         leave=False,
     )
 
+    #reset frechet distance accumulators
+    metrics.reset_embedding_lists()
+
     for encodings in progress:
-        # Move data to device
 
         #unpack encoding
         dac_encoding, clip_encoding, s3d_encoding = encodings
-        #change device
-        dac_encoding = dac_encoding.to(device)
-        clip_encoding = clip_encoding.to(device)
-        s3d_encoding = s3d_encoding.to(device)
 
+        #change device
+        dac_encoding = dac_encoding.to(rank if distributed else device)
+        clip_encoding = clip_encoding.to(rank if distributed else device)
+        s3d_encoding = s3d_encoding.to(rank if distributed else device)
+
+        #apply masking
         masked_encodings = torch.full(dac_encoding.shape, codebook_size, device=device)
 
+        #inference forward pass
         for step in range(steps):
             # Forward pass (inference-only)
             outputs = model(masked_encodings, clip_encoding, s3d_encoding)
             masked_encodings = inference_mask(outputs, step, steps)
 
-        # Metrics
+        ######## Get/update model metrics ##########
+        #frechet distance metrics
         predictions = model.decode(masked_encodings)
         targets = model.decode(dac_encoding)
-        results = metrics.get_metrics(
-            predictions, targets, clip_encoding, FDM=True
-        )
-        batch_fdm = results["FDM"]
-        # batch_cos = results["cos"]
-        distance_meter.update(batch_fdm)
-        # waveclip_meter.update(batch_cos)
+
+        #update frechet distance embedding accumulators
+        if metrics.model_metrics: 
+            metrics.store_FAD(predictions, targets)
+            metrics.store_FDD(predictions, targets)
+        metrics.store_FDM(predictions, targets)
+
 
         # Progress bar update
-        progress.set_postfix(
-            distance=f"{batch_fdm:.4f} ({distance_meter.avg:.4f})",
-            # waveclip=f"{batch_cos:.2f}% ({waveclip_meter.avg:.2f}%)",
-        )
+        # progress.set_postfix(
+        #     distance=f"{batch_fdm:.4f} ({distance_meter.avg:.4f})",
+        #     # waveclip=f"{batch_cos:.2f}% ({waveclip_meter.avg:.2f}%)",
+        # )
 
-    return distance_meter.avg # , waveclip_meter.avg
+    #get epoch frechet distances
+    FDD, FAD = None, None
+    if metrics.model_metrics: 
+        FDD = metrics.get_epoch_FDD()
+        FAD = metrics.get_epoch_FAD()
+    FDM = metrics.get_epoch_FDM()
+
+    #return only frechet distances
+    return FDM, FDD, FAD
