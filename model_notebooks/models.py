@@ -231,6 +231,7 @@ class MaskVatAdaLN(torch.nn.Module):
     def decode(self, predictions):
         """
         predictions: (batch, seq_len, K)
+        return (raw audio) : (batch, channels, len)
         """
         # print(predictions.shape)
         codes = torch.permute(predictions, (0, 2, 1))

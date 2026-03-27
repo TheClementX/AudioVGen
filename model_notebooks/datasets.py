@@ -111,11 +111,15 @@ class Metrics:
     """
 
     def __init__(self, model_metrics=False):
+        #get device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        #resampler for audio signals
         self.resampler = torchaudio.transforms.Resample(
             orig_freq=44100, new_freq=16000
         ).to(self.device)
 
+        #MFCC transform
         n_mfcc = 64
         self.mfcc_transform = torchaudio.transforms.MFCC(
             n_mfcc=n_mfcc,
@@ -123,6 +127,7 @@ class Metrics:
             melkwargs={"n_mels": 128, "win_length": 2048, "hop_length": 512, "n_fft": 2048},
         ).to(self.device)
 
+        #if using model Frechet Distance initialize an dload models
         self.model_metrics = model_metrics
         if self.model_metrics:
             # load wav2clip
@@ -139,12 +144,27 @@ class Metrics:
             self.dac_model.to("cuda")
             self.dac_model.eval()
 
-    # (batch, seq_len, embed_dim)
-    # could be numerically unstable
-    def embed_avg_frechet_distance(self, prediction, target, eps=1e-6):
-        # (batch * seq_len, embed_dim) basically one long sequence
-        predictions = prediction.reshape(-1, prediction.shape[-1]).double()
-        targets = target.reshape(-1, target.shape[-1]).double()
+        self.reset_embedding_lists()
+
+    def reset_embedding_lists(self): 
+        """
+        accumulate prediction and target embeddings for Frechet Distance
+        over entire validation set. 
+        """
+        self.FAD_preds = []
+        self.FAD_targs = []
+        self.FDM_preds = []
+        self.FDM_targs = []
+        self.FDD_preds = []
+        self.FDD_targs = []
+
+    def frechet_distance_over_distribution(self, prediction, target, eps=1e-6):
+        """
+        predictions : (seq_len, embed_dim)
+        target : (seq_len, embed_dim)
+        """
+        predictions = predictions.double()
+        targets = target.double()
 
         mu_p = torch.mean(predictions, dim=0)
         mu_t = torch.mean(targets, dim=0)
@@ -158,75 +178,133 @@ class Metrics:
         distances = frechet_distance(mu_p, sigma_p, mu_t, sigma_t)
         return distances.item()
 
-    """
-    frechet distance VGGish
-    assume (batch, 1, audio_len)
-    """
+    #functions to accumulate embeddings for frechet distance
+    def store_FAD(self, predictions, targets): 
+        """
+        predictions (raw signal) : (batch, channel, length) 
+        targets (raw signal) : (batch, channel, length)
+        """
+        #remove channel dimension
+        predictions = predictions.squeeze(1)
+        targets = targets.squeeze(1)
+        batch = predictions.shape[0]
 
-    def FAD(self, prediction, target):
+        #resample to 16khz
+        pred_resample = self.resampler(predictions).cpu().numpy()
+        tar_resample = self.resampler(targets).cpu().numpy()
 
-        prediction = prediction.squeeze(1)
-        target = target.squeeze(1)
-        batch = prediction.shape[0]
-
-        pred_resample = self.resampler(prediction)
-        tar_resample = self.resampler(target)
-
-        pred_batch_embeds = []
-        tar_batch_embeds = []
+        #preprocess embeddings for vggish
+        pred_mfcc = []
+        target_mfcc = []
         for b in range(batch):
-            pred_audio = pred_resample[b].cpu().numpy()
-            tar_audio = tar_resample[b].cpu().numpy()
+            pred_audio = pred_resample[b]
+            tar_audio = tar_resample[b]
 
             pred_mel = waveform_to_examples(pred_audio, 16000)
-            pred_tensor = torch.from_numpy(pred_mel).float()
             tar_mel = waveform_to_examples(tar_audio, 16000)
-            tar_tensor = torch.from_numpy(tar_mel).float()
 
-            with torch.no_grad():
-                pred_embed = self.vggish_model(pred_tensor)
-                pred_batch_embeds.append(pred_embed)
-                tar_embed = self.vggish_model(tar_tensor)
-                tar_batch_embeds.append(tar_embed)
+            pred_mfcc.append(torch.from_numpy(pred_mel).float())
+            target_mfcc.append(torch.from_numpy(tar_mel).float())
 
-        generated_embed = torch.concat(pred_batch_embeds, dim=0).unsqueeze(0)
-        target_embed = torch.concat(tar_batch_embeds, dim=0).unsqueeze(0)
+        #calculate actual VGGish embeddings
+        pred_tensor = torch.cat(pred_mfcc, dim=0).to(self.device)
+        target_tensor = torch.cat(target_mfcc, dim=0).to(self.device)
+        with torch.no_grad():
+            pred_embed = self.vggish_model(pred_tensor)
+            tar_embed = self.vggish_model(target_tensor)
 
-        return self.embed_avg_frechet_distance(generated_embed, target_embed)
+            self.FAD_preds.append(pred_embed.detach().cpu())
+            self.FAD_targs.append(tar_embed.detach().cpu())
 
-    """
-    frechet distance MFCC
-    assume (batch, 1, audio_len)
-    """
+    def store_FDD(self, predictions, targets): 
+        """
+        predictions (raw signal) : (batch, channel, length) 
+        targets (raw signal) : (batch, channel, length)
+        """
 
-    def FDM(self, prediction, target):
-        prediction = prediction.squeeze(1)
-        target = target.squeeze(1)
-        mfcc_pred = self.mfcc_transform(prediction).squeeze(1).permute(0, 2, 1)
-        mfcc_tar = self.mfcc_transform(target).squeeze(1).permute(0, 2, 1)
-
-        return self.embed_avg_frechet_distance(mfcc_pred, mfcc_tar)
-
-    """
-    frechet distance DAC
-    assume (batch, 1, audio_len)
-    """
-
-    def FDD(self, prediction, target):
-        # preprocess
-        pred_signal = self.dac_model.preprocess(prediction, 44100)
-        tar_signal = self.dac_model.preprocess(target, 44100)
+        # preprocess (no need to remove channel due to dac.preprocess)
+        pred_signal = self.dac_model.preprocess(predictions, 44100)
+        tar_signal = self.dac_model.preprocess(targets, 44100)
 
         # get embeddings (seem to be unormalized continous embeddings)
-        target_embed = self.dac_model.encode(tar_signal)[0]
-        generated_embed = self.dac_model.encode(pred_signal)[0]
+        # (batch, seq_len, embed_dim)
+        with torch.no_grad(): 
+            target_embed = self.dac_model.encode(tar_signal)[0].permute(0, 2, 1)
+            generated_embed = self.dac_model.encode(pred_signal)[0].permute(0, 2, 1)
 
-        target_embed = target_embed.permute(0, 2, 1)
-        generated_embed = generated_embed.permute(0, 2, 1)
+        #flatten to (batch * seq_len, embed_dim)
+        target_embed = target_embed.reshape(-1, target_embed.shape[-1])
+        generated_embed = generated_embed.reshape(-1, generated_embed.shape[-1])
 
-        return self.embed_avg_frechet_distance(generated_embed, target_embed)
+        #store embeddigns
+        self.FDD_preds.append(generated_embed.detach().cpu())
+        self.FDD_targs.append(target_embed.detach().cpu())
+
+    def store_FDM(self, predictions, targets): 
+        """
+        predictions (raw signal) : (batch, channel, length) 
+        targets (raw signal) : (batch, channel, length)
+        """
+        #remove channel
+        predictions = predictions.squeeze(1)
+        targets = targets.squeeze(1)
+
+        #generate mfcc representation (batch, seq_len, mfcc_dim)
+        mfcc_pred = self.mfcc_transform(predictions).permute(0, 2, 1)
+        mfcc_tar = self.mfcc_transform(targets).permute(0, 2, 1)
+
+        #(batch * seq_len , mfcc_dim)
+        mfcc_pred = mfcc_pred.reshape(-1, mfcc_pred.shape[-1])
+        mfcc_tar = mfcc_tar.reshape(-1, mfcc_tar.shape[-1])
+
+        #store representation
+        self.FDM_preds.append(mfcc_pred.detach().cpu())
+        self.FDM_targs.append(mfcc_tar.detach().cpu())
+
+    #functions to calculate frechet distance over a full validation pass
+    def get_epoch_FAD(self): 
+        """
+        calculate VGGish frechet distance over distribution of entire 
+        validation run 
+        """
+        #(seq_len * N * batch_size, embed_dim), N = num baches
+        predictions = torch.cat(self.FAD_preds, dim=0).to(self.device)
+        targets = torch.cat(self.FAD_targs, dim=0).to(self.device)
+
+        return self.frechet_distance_over_distribution(predictions, targets)
+
+    def get_epoch_FDD(self): 
+        """
+        calculate DAC frechet distance over distribution of entire 
+        validation run 
+        """
+        #(seq_len * N * batch_size, embed_dim), N = num baches
+        predictions = torch.cat(self.FDD_preds, dim=0).to(self.device)
+        targets = torch.cat(self.FDD_targs, dim=0).to(self.device)
+
+        return self.frechet_distance_over_distribution(predictions, targets)
+
+    def get_epoch_FDM(self): 
+        """
+        calculate MFCC frechet distance over distribution of entire 
+        validation run 
+        """
+        #(seq_len * N * batch_size, embed_dim), N = num baches
+        predictions = torch.cat(self.FDM_preds, dim=0).to(self.device)
+        targets = torch.cat(self.FDM_targs, dim=0).to(self.device)
+
+        #normalize with z-score normalization
+        predictions = (predictions - predictions.mean(dim=0)) / (predictions.std(dim=0) + 1e-6)
+        targets = (targets - targets.mean(dim=0)) / (targets.std(dim=0) + 1e-6)
+
+        return self.frechet_distance_over_distribution(predictions, targets)
+
+    ######### THESE METRICS NOT PROPERLY IMPLEMENTED / VERIFIED YET #############
 
     def wav_avg_cos_sim(self, prediction, target):
+        """
+        should not be used but retained for legacy purposes
+        """
         prediction = prediction.squeeze(1)
         target = target.squeeze(1)
         sim = torch.nn.functional.cosine_similarity(target, prediction, dim=1)
@@ -244,32 +322,29 @@ class Metrics:
 
         return:  average wave clip score for batch
         """
-        wcs = []
+        #remove channel dimension
         predictions = predictions.squeeze(1)
         targets = targets.squeeze(1)
-        batch, _ = predictions.shape
-        # Load model
-        wav2clip_model = self.wav2clip_model
 
         # wav2clip expects 16KHz audio, ours are 44.1KHz
-
+        # resample down to 16khz
         predictions = self.resampler(predictions)
         targets = self.resampler(targets)
-        # detach and change it to numpy
-        for B in range(batch):
-            pred = predictions[B].detach().cpu().numpy().flatten()
-            target = targets[B].detach().cpu().numpy().flatten()
-            # wav2clip expects 16KHz audio, ours are 44.1KHz
 
-            pred_emb = wav2clip.embed_audio(pred, wav2clip_model)
-            target_emb = wav2clip.embed_audio(target, wav2clip_model)
-            pred_emb = torch.from_numpy(pred_emb)
-            target_emb = torch.from_numpy(target_emb)
-            #  Torch will automatically L2 normalize
-            wc = torch.nn.functional.cosine_similarity(pred_emb, target_emb, dim=-1)
-            wcs.append(wc)
+        pred_audio = predictions.detach().cpu().numpy()
+        tar_audio = targets.detach().cpu().numpy()
 
-        return torch.mean(torch.cat(wcs).reshape(batch, 1))
+        #could require list wrapper around pred_audio and tar_audio
+        pred_emb = wav2clip.embed_audio(pred_audio, self.wav2clip_model)
+        target_emb = wav2clip.embed_audio(tar_audio, self.wav2clip_model)
+
+        pred_emb = torch.from_numpy(pred_emb)
+        target_emb = torch.from_numpy(target_emb)
+
+        #  Torch will automatically L2 normalize
+        batch_sims = torch.nn.functional.cosine_similarity(pred_emb, target_emb, dim=-1)
+
+        return batch_sims.mean().item()
 
     def cycle_clip(self, predictions, targets):
         pass
@@ -305,53 +380,6 @@ class Metrics:
 
         return corr.mean()
 
-    """
-    Takes in a tensor (batch, 1, audio_len)
-        -> audio should be mono
-        -> audio is 44.1khz
-    """
-
-    def get_metrics(
-        self,
-        predictions,
-        targets,
-        clip,
-        avg_cosine_similarity=False,
-        FAD=False,
-        FDM=False,
-        FDD=False,
-        wave_clip=False,
-        cycle_clip=False,
-        novelty=False,
-    ):
-    """
-    predictions, targets : raw waveforms, embeddings are calculated on the fly
-    """
-
-        results = dict()
-        """
-        -> cos similarity is bad due to phase issues on raw audio.
-        -> Use cos similarity on embeddings if anything
-        -> make frechet distance computed batchwise instead of example wise
-        """
-        if avg_cosine_similarity:
-            results["cos"] = self.wav_avg_cos_sim(predictions, targets)
-        if FAD and self.model_metrics:
-            results["FAD"] = self.FAD(predictions, targets)
-        if FDM:
-            results["FDM"] = self.FDM(predictions, targets)
-        if FDD and self.model_metrics:
-            results["FDD"] = self.FDD(predictions, targets)
-        if wave_clip and self.model_metrics:
-            results["wave_clip"] = self.wave_clip(predictions, targets)
-        if cycle_clip and self.model_metrics:
-            results["cycle_clip"] = self.cycle_clip(predictions, clip)
-        if novelty and self.model_metrics:
-            results["NS"] = self.novelty_score(predictions, targets)
-
-        return results
-
-
 class AudioVideoDataset(Dataset):
     def __init__(self, data_paths, with_beats=False):
         self.data_paths = data_paths
@@ -365,21 +393,12 @@ class AudioVideoDataset(Dataset):
         audio_encoding = np.load(audio_file_path)
         video_encoding = np.load(video_file_path)
 
-        # dac = audio_encoding["dac"]
-        # clip = video_encoding["clip"]
-        # s3d = video_encoding["s3d"]
-
-        # if np.isnan(dac).any() or np.isnan(clip).any() or np.isnan(s3d).any():
-        #     print(audio_file_path, video_file_path)
-
-        # if np.isinf(dac).any() or np.isinf(clip).any() or np.isinf(s3d).any():
-        #     print(audio_file_path, video_file_path)
-
         ret_list = [
             audio_encoding["dac"],
             video_encoding["clip"],
             video_encoding["s3d"],
         ]
+
         if self.with_beats:
             ret_list.append(audio_encoding["beats"])
 

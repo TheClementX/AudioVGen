@@ -193,19 +193,19 @@ for epoch in range(start_epoch, config["epochs"]):
     }
 
     # -----------------------------
-    # Classification Validation
+    # Validation and compute frechet distance
     # -----------------------------
     if eval_cls:
-        distance = valid_epoch(
+        FDM, FDD, FAD = valid_epoch(
             model,
             valid_loader,
             DEVICE,
             inference_metrics,
         )
-        print(f"Val (Cls) | Distance: {distance:.4f}")
+        print(f"Val (Cls) | Distance: {FDM:.4f}")
         metrics.update(
             {
-                "valid_distance": distance,
+                "FDM": FDM,
             }
         )
 
@@ -216,9 +216,9 @@ for epoch in range(start_epoch, config["epochs"]):
     save_model(model, optimizer, scheduler, metrics, epoch, checkpoint_path)
     print(f"Saved last epoch model: {checkpoint_path}")
 
-    # Save model with best validation loss
-    if eval_cls and best_distance >= distance:
-        best_distance = distance
+    # Save model with best validation FDM distance
+    if eval_cls and best_distance >= FDM:
+        best_distance = FDM
         best_distance_path = os.path.join(config["checkpoint_dir"], "best_distance.pth")
         save_model(model, optimizer, scheduler, metrics, epoch, best_distance_path)
         # if "wandb" in globals() and run is not None:
