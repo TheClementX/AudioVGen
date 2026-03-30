@@ -30,10 +30,12 @@ config = {
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
     "lr": 0.0001,
-    "epochs": 50,
+    "epochs": 150,
     "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
-    "batch_size": 16,  # batch size for training
+    "batch_size": 256,  # batch size for training
     "checkpoint_dir": "./checkpoints",
+    "pct_start" : 0.2,
+    "scheduler": False
 }
 
 # Datasets
@@ -83,19 +85,22 @@ optimizer = optim.AdamW(
 )
 
 # Scheduler
-scheduler = optim.lr_scheduler.OneCycleLR(
-    optimizer, 
-    max_lr=config['lr'], 
-    epochs=config["epochs"],
-    steps_per_epoch=len(train_loader)
-)
+scheduler = None
+if config['scheduler']: 
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=config['lr'], 
+        epochs=config["epochs"],
+        steps_per_epoch=len(train_loader), 
+        pct_start=config['pct_start']
+    )
 
 # Mixed-Precision Training
 scaler = torch.amp.GradScaler(device="cuda")
 
 wandb.login(key="")
 
-run_name = "inference_mask_correct"
+run_name = "single_trining_run_const_lr"
 
 run = wandb.init(
     name = run_name,
@@ -119,17 +124,29 @@ def save_model(model, optimizer, scheduler, metrics, epoch, path):
         epoch (int): Current epoch
         path (str): Path to save checkpoint
     """
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "metrics": metrics,
-            "epoch": epoch,
-        },
-        path,
-    )
-    print(f"Checkpoint saved at {path}")
+    if scheduler is not None: 
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "metrics": metrics,
+                "epoch": epoch,
+            },
+            path,
+        )
+        print(f"Checkpoint saved at {path}")
+    else: 
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "metrics": metrics,
+                "epoch": epoch,
+            },
+            path,
+        )
+        print(f"Checkpoint saved at {path}")
 
 
 def load_model(
@@ -173,6 +190,18 @@ inference_metrics = Metrics()
 
 gc.collect()
 torch.cuda.empty_cache()
+
+#load a model if desired
+load = True
+if load: 
+    print('loading a model for training')
+    map_location = DEVICE
+    checkpoint = torch.load(
+        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/fourth_checkpoint.pth', 
+        map_location=map_location
+    )
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print('model loaded')
 
 # torch.autograd.set_detect_anomaly(True)
 for epoch in range(start_epoch, config["epochs"]):
@@ -221,18 +250,7 @@ for epoch in range(start_epoch, config["epochs"]):
         best_distance = FDM
         best_distance_path = os.path.join(config["checkpoint_dir"], "best_distance.pth")
         save_model(model, optimizer, scheduler, metrics, epoch, best_distance_path)
-        # if "wandb" in globals() and run is not None:
-        #     wandb.save(best_distance_path)
         print(f"Saved best distance validation model: {best_distance_path}")
-
-    # Save model with best validation loss
-    # if eval_cls and best_cos_sim <= cos_sim:
-    #     best_cos_sim = cos_sim
-    #     best_cos_sim_path = os.path.join(config["checkpoint_dir"], "best_cos_sim.pth")
-    #     save_model(model, optimizer, scheduler, metrics, epoch, best_cos_sim_path)
-    #     if "wandb" in globals() and run is not None:
-    #         wandb.save(best_cos_sim_path)
-    #     print(f"Saved best waveclip validation model: {best_cos_sim_path}")
 
     # -----------------------------
     # Log metrics

@@ -158,13 +158,13 @@ class Metrics:
         self.FDD_preds = []
         self.FDD_targs = []
 
-    def frechet_distance_over_distribution(self, prediction, target, eps=1e-6):
+    def frechet_distance_over_distribution(self, predictions, targets, eps=1e-6):
         """
         predictions : (seq_len, embed_dim)
         target : (seq_len, embed_dim)
         """
         predictions = predictions.double()
-        targets = target.double()
+        targets = targets.double()
 
         mu_p = torch.mean(predictions, dim=0)
         mu_t = torch.mean(targets, dim=0)
@@ -371,7 +371,7 @@ class Metrics:
         kernel = torch.ones(k, k)
         kernel[: k // 2, : k // 2] = -1
         kernel[k // 2 :, k // 2 :] = -1
-        kernel = kernel.unsqueeze(0).unsqueeze(0).to("cuda")
+        kernel = kernel.unsqueeze(0).unsqueeze(0).to(self.device)
 
         pred_nov = self._get_novelty_curve(predictions, kernel, k)
         targ_nov = self._get_novelty_curve(targets, kernel, k)

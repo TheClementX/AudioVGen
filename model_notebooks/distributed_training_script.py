@@ -17,11 +17,13 @@ from torchinfo import summary
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+import datetime
 
 ####### DISTRIBUTD TRAINING INITIALIZATION #############
 
 def distributed_setup(): 
-    dist.init_process_group(backend="nccl")
+    #added timeout increase for validation epoch
+    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=60))
     local_rank = int(os.environ['LOCAL_RANK'])
     torch.cuda.set_device(local_rank)
 
@@ -44,11 +46,12 @@ config = {
     "K": 9,  # dimensions of DAC encoding
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
-    "lr": 0.0001,
-    "epochs": 50,
+    "lr": 0.0004,
+    "epochs": 150,
     "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
     "batch_size": 16,  # batch size for training
     "checkpoint_dir": "./checkpoints",
+    "pct_start": 0.2
 }
 
 ####### DATASETS AND DATA LOADERS #########
@@ -56,7 +59,6 @@ config = {
 train_dataset, valid_dataset = get_datasets(config["data_root"])
 
 train_sampler = DistributedSampler(train_dataset)
-val_sampler = DistributedSampler(valid_dataset)
 
 train_loader = DataLoader(
     dataset=train_dataset,
@@ -64,10 +66,11 @@ train_loader = DataLoader(
     sampler=train_sampler, 
     shuffle=False
 )
+
+#no sampler for single gpu inference 
 valid_loader = DataLoader(
     dataset=valid_dataset,
     batch_size=config["batch_size"],
-    sampler=val_sampler,
     shuffle=False
 )
 
@@ -89,7 +92,7 @@ model = MaskVatAdaLN(
     config["K"],
     config["codebook_size"],
 ).to(local_rank)
-model = DDP(model, device_ids=[local_rank])
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 if local_rank == 0: 
     summary(model)
@@ -107,16 +110,17 @@ scheduler = optim.lr_scheduler.OneCycleLR(
     optimizer, 
     max_lr=config['lr'], 
     epochs=config["epochs"],
-    steps_per_epoch=len(train_loader)
+    steps_per_epoch=len(train_loader), 
+    pct_start=config['pct_start']
 )
 
 # Mixed-Precision Training
 scaler = torch.amp.GradScaler(device="cuda")
 
 if local_rank == 0: 
-    wandb.login(key="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")
+    wandb.login(key="")
 
-    run_name = "inference_mask_correct"
+    run_name = "distributed_run_1"
 
     run = wandb.init(
         name = run_name,
@@ -164,7 +168,7 @@ def load_model(
         optimizer (Optimizer, optional): Optimizer to load state
         scheduler (LRScheduler, optional): Scheduler to load state
         path (str): Path to checkpoint file
-        device (torch.device, optional): Device mapping for checkpoint
+        device (torch.device, optional): Device mapping for partitioncheckpoint
 
     Returns:
         tuple: model, optimizer, scheduler, epoch, metrics
@@ -194,6 +198,17 @@ inference_metrics = Metrics()
 gc.collect()
 torch.cuda.empty_cache()
 
+load = True
+if load: 
+    print('loading a model for training')
+    map_location = DEVICE
+    checkpoint = torch.load(
+        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/loss_six_model.pth', 
+        map_location=map_location
+    )
+    model.module.load_state_dict(checkpoint['model_state_dict'])
+    print('model loaded')
+
 # torch.autograd.set_detect_anomaly(True)
 for epoch in range(start_epoch, config["epochs"]):
     if local_rank == 0: 
@@ -201,7 +216,6 @@ for epoch in range(start_epoch, config["epochs"]):
 
     #set sampler epoch
     train_loader.sampler.set_epoch(epoch)
-    valid_loader.sampler.set_epoch(epoch)
 
     # -----------------------------
     # Train
@@ -217,6 +231,7 @@ for epoch in range(start_epoch, config["epochs"]):
     if local_rank == 0: 
         print(f"Train | Loss: {train_loss:.4f} | LR: {curr_lr:.6f}")
 
+    #TODO: Make sure to sync metrics in training functions
     metrics = {
         "train_loss": train_loss,
         "lr": curr_lr,
@@ -224,24 +239,23 @@ for epoch in range(start_epoch, config["epochs"]):
 
     # -----------------------------
     # Validation and compute frechet distance
+    # run validation and checkpointing on only a single gpu
     # -----------------------------
-    FDM, FDD, FAD = valid_epoch(
-        model,
-        valid_loader,
-        DEVICE,
-        inference_metrics,
-        distributed=True, 
-        rank=local_rank
-    )
-
     if local_rank == 0: 
+        FDM, FDD, FAD = valid_epoch(
+            model.module,
+            valid_loader,
+            DEVICE,
+            inference_metrics,
+            distributed=False, 
+        )
+
         print(f"Val (Cls) | Distance: {FDM:.4f}")
-    metrics['FDM'] = FDM
+        metrics['FDM'] = FDM
 
-    # -----------------------------
-    # Save checkpoints
-    # -----------------------------
-    if local_rank == 0: 
+        # -----------------------------
+        # Save checkpoints
+        # -----------------------------
         checkpoint_path = os.path.join(config["checkpoint_dir"], f"last_{run_name}.pth")
         save_model(model, optimizer, scheduler, metrics, epoch, checkpoint_path)
         print(f"Saved last epoch model: {checkpoint_path}")
@@ -251,23 +265,14 @@ for epoch in range(start_epoch, config["epochs"]):
             best_distance = FDM
             best_distance_path = os.path.join(config["checkpoint_dir"], "best_distance.pth")
             save_model(model, optimizer, scheduler, metrics, epoch, best_distance_path)
-            # if "wandb" in globals() and run is not None:
-            #     wandb.save(best_distance_path)
             print(f"Saved best distance validation model: {best_distance_path}")
-
-        # Save model with best validation loss
-        # if eval_cls and best_cos_sim <= cos_sim:
-        #     best_cos_sim = cos_sim
-        #     best_cos_sim_path = os.path.join(config["checkpoint_dir"], "best_cos_sim.pth")
-        #     save_model(model, optimizer, scheduler, metrics, epoch, best_cos_sim_path)
-        #     if "wandb" in globals() and run is not None:
-        #         wandb.save(best_cos_sim_path)
-        #     print(f"Saved best waveclip validation model: {best_cos_sim_path}")
 
         # -----------------------------
         # Log metrics
         # -----------------------------
         if "run" in globals() and run is not None:
             run.log(metrics)
+
+    dist.barrier()
 
 dist.destroy_process_group()

@@ -3,6 +3,7 @@ import math
 from tqdm import tqdm
 from datasets import training_mask, inference_mask, Metrics
 from models import MaskVatAdaLN
+import torch.distributed as dist
 
 import numpy as np
 
@@ -149,7 +150,15 @@ def train_epoch(
         if scheduler is not None:
             scheduler.step()
 
-    # return acc_meter.avg, loss_meter.avg
+    #if distributed take average total loss
+    if distributed: 
+        local_avg_loss = torch.tensor([loss_meter.avg], dtype=torch.float32, device=rank)
+        dist.all_reduce(local_avg_loss, op=dist.ReduceOp.SUM)
+
+        global_avg_loss = local_avg_loss.item() / dist.get_world_size()
+        return global_avg_loss
+
+    #return full loss if not distributed
     return loss_meter.avg
 
 
@@ -187,7 +196,7 @@ def valid_epoch(
         s3d_encoding = s3d_encoding.to(rank if distributed else device)
 
         #apply masking
-        masked_encodings = torch.full(dac_encoding.shape, codebook_size, device=device)
+        masked_encodings = torch.full(dac_encoding.shape, codebook_size, device=dac_encoding.device)
 
         #inference forward pass
         for step in range(steps):
