@@ -222,6 +222,11 @@ class MaskVatAdaLN(torch.nn.Module):
         dac_embeddings = self.get_embeddings(d)
         conditions = self.make_conditioning(c, s)
 
+        if self.training:
+            batch = conditions.shape[0]
+            drop_mask = (torch.rand(batch, 1, 1, device=conditions.device) > 0.1).float()
+            conditions = conditions * drop_mask
+
         DiT, _ = self.backbone(dac_embeddings, conditions)
         linear = self.final_linear(DiT)
         # (batch, seq_len, codebook * K) -> (batch, seq_len, K, codebook_size

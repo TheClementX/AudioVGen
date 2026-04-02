@@ -6,6 +6,7 @@ import wandb
 import gc
 
 import os
+from configparser import ConfigParser
 
 from models import MaskVatAdaLN
 from datasets import get_datasets
@@ -13,6 +14,7 @@ from training import train_epoch, valid_epoch
 from datasets import Metrics
 
 from torchinfo import summary
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 import numpy as np
 
@@ -35,7 +37,7 @@ config = {
     "batch_size": 256,  # batch size for training
     "checkpoint_dir": "./checkpoints",
     "pct_start" : 0.2,
-    "scheduler": False
+    "scheduler": True
 }
 
 # Datasets
@@ -76,6 +78,11 @@ model = MaskVatAdaLN(
 
 summary(model)
 
+#setup EMA
+decay = 0.999
+ema_avg_fn = get_ema_multi_avg_fn(decay)
+ema_model = AveragedModel(model, multi_avg_fn=ema_avg_fn)
+
 # Loss function
 criterion = nn.CrossEntropyLoss()
 
@@ -87,18 +94,19 @@ optimizer = optim.AdamW(
 # Scheduler
 scheduler = None
 if config['scheduler']: 
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=config['lr'], 
-        epochs=config["epochs"],
-        steps_per_epoch=len(train_loader), 
-        pct_start=config['pct_start']
+    scheduler = optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=config["lr"],
+        total_iters=20,
     )
 
 # Mixed-Precision Training
 scaler = torch.amp.GradScaler(device="cuda")
 
-wandb.login(key="")
+CF = ConfigParser()
+CF.read("./config.ini")
+wandb_key = CF.get("Wandb", "key")
+wandb.login(key=wandb_key)
 
 run_name = "single_trining_run_const_lr"
 
@@ -112,7 +120,7 @@ run = wandb.init(
 # Ensure checkpoint directory exists
 os.makedirs(config["checkpoint_dir"], exist_ok=True)
 
-def save_model(model, optimizer, scheduler, metrics, epoch, path):
+def save_model(model, ema_model, optimizer, scheduler, metrics, epoch, path):
     """
     Saves model, optimizer, scheduler, and training metrics to a checkpoint.
 
@@ -128,6 +136,7 @@ def save_model(model, optimizer, scheduler, metrics, epoch, path):
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
+                "ema_model_state_dict": ema_model.state_dict(), 
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "metrics": metrics,
@@ -140,6 +149,7 @@ def save_model(model, optimizer, scheduler, metrics, epoch, path):
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
+                "ema_model_state_dict": ema_model.state_dict(), 
                 "optimizer_state_dict": optimizer.state_dict(),
                 "metrics": metrics,
                 "epoch": epoch,
@@ -148,59 +158,27 @@ def save_model(model, optimizer, scheduler, metrics, epoch, path):
         )
         print(f"Checkpoint saved at {path}")
 
-
-def load_model(
-    model, optimizer=None, scheduler=None, path="./checkpoint.pth", device=None
-):
-    """
-    Loads model, optimizer, scheduler, and metrics from a checkpoint.
-
-    Args:
-        model (nn.Module): Model to load weights into
-        optimizer (Optimizer, optional): Optimizer to load state
-        scheduler (LRScheduler, optional): Scheduler to load state
-        path (str): Path to checkpoint file
-        device (torch.device, optional): Device mapping for checkpoint
-
-    Returns:
-        tuple: model, optimizer, scheduler, epoch, metrics
-    """
-    map_location = device if device is not None else "cpu"
-    checkpoint = torch.load(path, map_location=map_location, weights_only=False)
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-    epoch = checkpoint.get("epoch", 0)
-    metrics = checkpoint.get("metrics", {})
-
-    print(f"Checkpoint loaded from {path} (epoch {epoch})")
-    return model, optimizer, scheduler, epoch, metrics
-
-
 start_epoch = 0
 best_distance = np.inf
-# best_cos_sim = 0.0
-eval_cls = True
-
 inference_metrics = Metrics()
 
 gc.collect()
 torch.cuda.empty_cache()
 
-#load a model if desired
-load = True
+#load a model for training resume
+load = False
 if load: 
     print('loading a model for training')
     map_location = DEVICE
     checkpoint = torch.load(
-        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/fourth_checkpoint.pth', 
+        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/fifth_checkpoint.pth', 
         map_location=map_location
     )
     model.load_state_dict(checkpoint['model_state_dict'])
+    ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    start_epoch = checkpoint['epoch']  + 1
     print('model loaded')
 
 # torch.autograd.set_detect_anomaly(True)
@@ -211,7 +189,7 @@ for epoch in range(start_epoch, config["epochs"]):
     # Train
     # -----------------------------
     train_loss = train_epoch(
-        model, train_loader, optimizer, scheduler, scaler, DEVICE, criterion
+        model, ema_model, train_loader, optimizer, scheduler, scaler, DEVICE, criterion
     )
     curr_lr = optimizer.param_groups[0]["lr"]
     print(f"Train | Loss: {train_loss:.4f} | LR: {curr_lr:.6f}")
@@ -224,32 +202,29 @@ for epoch in range(start_epoch, config["epochs"]):
     # -----------------------------
     # Validation and compute frechet distance
     # -----------------------------
-    if eval_cls:
-        FDM, FDD, FAD = valid_epoch(
-            model,
-            valid_loader,
-            DEVICE,
-            inference_metrics,
-        )
-        print(f"Val (Cls) | Distance: {FDM:.4f}")
-        metrics.update(
-            {
-                "FDM": FDM,
-            }
-        )
+    FDM, FDD, FAD = valid_epoch(
+        ema_model,
+        valid_loader,
+        DEVICE,
+        inference_metrics,
+    )
+    print(f"Val (Cls) | Distance: {FDM:.4f}")
+    metrics.update({
+            "FDM": FDM,
+    })
 
     # -----------------------------
     # Save checkpoints
     # -----------------------------
     checkpoint_path = os.path.join(config["checkpoint_dir"], f"last_{run_name}.pth")
-    save_model(model, optimizer, scheduler, metrics, epoch, checkpoint_path)
+    save_model(model, ema_model, optimizer, scheduler, metrics, epoch, checkpoint_path)
     print(f"Saved last epoch model: {checkpoint_path}")
 
     # Save model with best validation FDM distance
-    if eval_cls and best_distance >= FDM:
+    if best_distance >= FDM:
         best_distance = FDM
         best_distance_path = os.path.join(config["checkpoint_dir"], "best_distance.pth")
-        save_model(model, optimizer, scheduler, metrics, epoch, best_distance_path)
+        save_model(model, ema_model, optimizer, scheduler, metrics, epoch, best_distance_path)
         print(f"Saved best distance validation model: {best_distance_path}")
 
     # -----------------------------
@@ -257,3 +232,5 @@ for epoch in range(start_epoch, config["epochs"]):
     # -----------------------------
     if "run" in globals() and run is not None:
         run.log(metrics)
+
+    scheduler.step()

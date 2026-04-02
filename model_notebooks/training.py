@@ -58,6 +58,7 @@ def topk_accuracy(logits: torch.Tensor, targets: torch.Tensor, topk=(1,)):
 
 def train_epoch(
     model,
+    ema_model,
     dataloader,
     optimizer,
     scheduler,
@@ -150,6 +151,9 @@ def train_epoch(
         if scheduler is not None:
             scheduler.step()
 
+        #update ema_model weights
+        ema_model.update_parameters(model)
+
     #if distributed take average total loss
     if distributed: 
         local_avg_loss = torch.tensor([loss_meter.avg], dtype=torch.float32, device=rank)
@@ -164,7 +168,7 @@ def train_epoch(
 
 @torch.no_grad()
 def valid_epoch(
-    model: MaskVatAdaLN,
+    model,
     dataloader,
     device,
     metrics: Metrics,
@@ -197,12 +201,19 @@ def valid_epoch(
 
         #apply masking
         masked_encodings = torch.full(dac_encoding.shape, codebook_size, device=dac_encoding.device)
-
+        omega = 3.0
         #inference forward pass
         for step in range(steps):
             # Forward pass (inference-only)
-            outputs = model(masked_encodings, clip_encoding, s3d_encoding)
+            # outputs = model(masked_encodings, clip_encoding, s3d_encoding)
+            # masked_encodings = inference_mask(outputs, step, steps)
+
+            ouputs_cond = model(masked_encodings, clip_encoding, s3d_encoding)
+            output_uncond = model(masked_encodings, torch.zeros_like(clip_encoding), torch.zeros_like(s3d_encoding))
+
+            outputs = ouputs_cond + omega * (ouputs_cond - output_uncond)
             masked_encodings = inference_mask(outputs, step, steps)
+
 
         ######## Get/update model metrics ##########
         #frechet distance metrics

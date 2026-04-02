@@ -5,3 +5,4 @@ __pycache__
 BEATs_iter3_plus_AS2M.pt
 checkpoints
 wandb
+config.ini

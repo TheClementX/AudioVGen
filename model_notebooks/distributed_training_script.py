@@ -6,12 +6,14 @@ import wandb
 import gc
 import os
 import numpy as np
+from configparser import ConfigParser
 
 from models import MaskVatAdaLN
 from datasets import get_datasets
 from training import train_epoch, valid_epoch
 from datasets import Metrics
 from torchinfo import summary
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 #distributed imports
 import torch.distributed as dist
@@ -46,10 +48,10 @@ config = {
     "K": 9,  # dimensions of DAC encoding
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
-    "lr": 0.0004,
+    "lr": 0.0001,
     "epochs": 150,
     "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
-    "batch_size": 16,  # batch size for training
+    "batch_size": 256,  # batch size for training
     "checkpoint_dir": "./checkpoints",
     "pct_start": 0.2
 }
@@ -82,6 +84,7 @@ if local_rank == 0:
     print(f"clip dimensions {retlist[1].shape}")
     print(f"s3d dimensions {retlist[2].shape}")
 
+#init model
 model = MaskVatAdaLN(
     config["seq_len"],
     config["embed_dim"],
@@ -92,8 +95,16 @@ model = MaskVatAdaLN(
     config["K"],
     config["codebook_size"],
 ).to(local_rank)
+
+#distribute model
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
+#create ema model
+decay = 0.999
+ema_avg_fn = get_ema_multi_avg_fn(decay)
+ema_model = AveragedModel(model.module, multi_avg_fn=ema_avg_fn)
+
+#print model architecture
 if local_rank == 0: 
     summary(model)
 
@@ -106,19 +117,20 @@ optimizer = optim.AdamW(
 )
 
 # Scheduler
-scheduler = optim.lr_scheduler.OneCycleLR(
-    optimizer, 
-    max_lr=config['lr'], 
-    epochs=config["epochs"],
-    steps_per_epoch=len(train_loader), 
-    pct_start=config['pct_start']
+scheduler = optim.lr_scheduler.LinearLR(
+    optimizer,
+    start_factor=config["lr"],
+    total_iters=20,
 )
 
 # Mixed-Precision Training
 scaler = torch.amp.GradScaler(device="cuda")
 
-if local_rank == 0: 
-    wandb.login(key="")
+if local_rank == 0:
+    CF = ConfigParser()
+    CF.read("./config.ini")
+    wandb_key = CF.get("Wandb", "key")
+    wandb.login(key=wandb_key)
 
     run_name = "distributed_run_1"
 
@@ -132,7 +144,7 @@ if local_rank == 0:
 # Ensure checkpoint directory exists
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
 
-def save_model(model, optimizer, scheduler, metrics, epoch, path):
+def save_model(model, ema_model, optimizer, scheduler, metrics, epoch, path):
     """
     Saves model, optimizer, scheduler, and training metrics to a checkpoint.
 
@@ -147,6 +159,7 @@ def save_model(model, optimizer, scheduler, metrics, epoch, path):
     torch.save(
         {
             "model_state_dict": model.module.state_dict(),
+            "ema_model_state_dict": ema_model.state_dict(), 
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "metrics": metrics,
@@ -156,43 +169,8 @@ def save_model(model, optimizer, scheduler, metrics, epoch, path):
     )
     print(f"Checkpoint saved at {path}")
 
-
-def load_model(
-    model, optimizer=None, scheduler=None, path="./checkpoint.pth", device=None
-):
-    """
-    Loads model, optimizer, scheduler, and metrics from a checkpoint.
-
-    Args:
-        model (nn.Module): Model to load weights into
-        optimizer (Optimizer, optional): Optimizer to load state
-        scheduler (LRScheduler, optional): Scheduler to load state
-        path (str): Path to checkpoint file
-        device (torch.device, optional): Device mapping for partitioncheckpoint
-
-    Returns:
-        tuple: model, optimizer, scheduler, epoch, metrics
-    """
-    map_location = device if device is not None else "cpu"
-    checkpoint = torch.load(path, map_location=map_location, weights_only=False)
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-    epoch = checkpoint.get("epoch", 0)
-    metrics = checkpoint.get("metrics", {})
-
-    print(f"Checkpoint loaded from {path} (epoch {epoch})")
-    return model, optimizer, scheduler, epoch, metrics
-
-
 start_epoch = 0
 best_distance = np.inf
-# best_cos_sim = 0.0
-
 inference_metrics = Metrics()
 
 gc.collect()
@@ -207,6 +185,10 @@ if load:
         map_location=map_location
     )
     model.module.load_state_dict(checkpoint['model_state_dict'])
+    ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1
     print('model loaded')
 
 # torch.autograd.set_detect_anomaly(True)
@@ -221,7 +203,7 @@ for epoch in range(start_epoch, config["epochs"]):
     # Train
     # -----------------------------
     train_loss = train_epoch(
-        model, train_loader, optimizer, 
+        model, ema_model, train_loader, optimizer, 
         scheduler, scaler, DEVICE, criterion,
         distributed=True, 
         rank=local_rank
@@ -243,7 +225,7 @@ for epoch in range(start_epoch, config["epochs"]):
     # -----------------------------
     if local_rank == 0: 
         FDM, FDD, FAD = valid_epoch(
-            model.module,
+            ema_model,
             valid_loader,
             DEVICE,
             inference_metrics,
@@ -257,14 +239,14 @@ for epoch in range(start_epoch, config["epochs"]):
         # Save checkpoints
         # -----------------------------
         checkpoint_path = os.path.join(config["checkpoint_dir"], f"last_{run_name}.pth")
-        save_model(model, optimizer, scheduler, metrics, epoch, checkpoint_path)
+        save_model(model, ema_model, optimizer, scheduler, metrics, epoch, checkpoint_path)
         print(f"Saved last epoch model: {checkpoint_path}")
 
         # Save model with best validation FDM distance
         if best_distance >= FDM:
             best_distance = FDM
             best_distance_path = os.path.join(config["checkpoint_dir"], "best_distance.pth")
-            save_model(model, optimizer, scheduler, metrics, epoch, best_distance_path)
+            save_model(model, ema_model, optimizer, scheduler, metrics, epoch, best_distance_path)
             print(f"Saved best distance validation model: {best_distance_path}")
 
         # -----------------------------
