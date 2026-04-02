@@ -96,7 +96,7 @@ scheduler = None
 if config['scheduler']: 
     scheduler = optim.lr_scheduler.LinearLR(
         optimizer,
-        start_factor=config["lr"],
+        start_factor=0.01,
         total_iters=20,
     )
 
@@ -233,5 +233,5 @@ for epoch in range(start_epoch, config["epochs"]):
     if "run" in globals() and run is not None:
         run.log(metrics)
 
-    if scheudler is not None: 
+    if scheduler is not None: 
         scheduler.step()

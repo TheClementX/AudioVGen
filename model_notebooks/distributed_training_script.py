@@ -119,7 +119,7 @@ optimizer = optim.AdamW(
 # Scheduler
 scheduler = optim.lr_scheduler.LinearLR(
     optimizer,
-    start_factor=config["lr"],
+    start_factor=0.01,
     total_iters=20,
 )
 
