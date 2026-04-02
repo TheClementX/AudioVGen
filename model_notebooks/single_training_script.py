@@ -233,4 +233,5 @@ for epoch in range(start_epoch, config["epochs"]):
     if "run" in globals() and run is not None:
         run.log(metrics)
 
-    scheduler.step()
+    if scheudler is not None: 
+        scheduler.step()
