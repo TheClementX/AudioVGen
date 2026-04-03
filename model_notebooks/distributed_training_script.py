@@ -14,6 +14,7 @@ from training import train_epoch, valid_epoch
 from datasets import Metrics
 from torchinfo import summary
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+import dac
 
 #distributed imports
 import torch.distributed as dist
@@ -49,7 +50,7 @@ config = {
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
     "lr": 0.0001,
-    "epochs": 150,
+    "epochs": 400,
     "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
     "batch_size": 256,  # batch size for training
     "checkpoint_dir": "./checkpoints",
@@ -64,7 +65,10 @@ train_sampler = DistributedSampler(train_dataset)
 
 train_loader = DataLoader(
     dataset=train_dataset,
+    num_workers=12,
     batch_size=config["batch_size"],
+    pin_memory=True,
+    prefetch_factor=4,
     sampler=train_sampler, 
     shuffle=False
 )
@@ -72,7 +76,10 @@ train_loader = DataLoader(
 #no sampler for single gpu inference 
 valid_loader = DataLoader(
     dataset=valid_dataset,
+    num_workers=8,
+    prefetch_factor=4,
     batch_size=config["batch_size"],
+    pin_memory=True, 
     shuffle=False
 )
 
@@ -97,12 +104,20 @@ model = MaskVatAdaLN(
 ).to(local_rank)
 
 #distribute model
-model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
 #create ema model
 decay = 0.999
 ema_avg_fn = get_ema_multi_avg_fn(decay)
 ema_model = AveragedModel(model.module, multi_avg_fn=ema_avg_fn)
+
+#load DAC for decoding
+dac_model_path = dac.utils.download(model_type="44khz")
+dac_model = dac.DAC.load(dac_model_path)
+dac_model.to("cuda")
+dac_model.eval()
+for p in dac_model.parameters():
+    p.requires_grad = False
 
 #print model architecture
 if local_rank == 0: 
@@ -130,7 +145,7 @@ if local_rank == 0:
     CF = ConfigParser()
     CF.read("./config.ini")
     wandb_key = CF.get("Wandb", "key")
-    wandb.login(key=wandb_key)
+    wandb.login(key='')
 
     run_name = "distributed_run_1"
 
@@ -181,8 +196,8 @@ if load:
     print('loading a model for training')
     map_location = DEVICE
     checkpoint = torch.load(
-        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/loss_six_model.pth', 
-        map_location=map_location
+        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/last_single_trining_run_const_lr.pth', 
+        map_location=f"cuda:{map_location}"
     )
     model.module.load_state_dict(checkpoint['model_state_dict'])
     ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
@@ -213,7 +228,6 @@ for epoch in range(start_epoch, config["epochs"]):
     if local_rank == 0: 
         print(f"Train | Loss: {train_loss:.4f} | LR: {curr_lr:.6f}")
 
-    #TODO: Make sure to sync metrics in training functions
     metrics = {
         "train_loss": train_loss,
         "lr": curr_lr,
@@ -225,7 +239,9 @@ for epoch in range(start_epoch, config["epochs"]):
     # -----------------------------
     if local_rank == 0: 
         FDM, FDD, FAD = valid_epoch(
+            model,
             ema_model,
+            dac_model, 
             valid_loader,
             DEVICE,
             inference_metrics,

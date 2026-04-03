@@ -8,13 +8,11 @@ implementation of DiT blocks Positional Encoding and MaskVat_adaln
 all attention mechanisms use batch first conventions.
 
 input dims
-    TODO: switch dac time embed dims remove batch in audio encodings
     -> DAC : (seq_len, embed_dim)
     -> BEATs : (seq_len, embed_dim) -> 
     -> CLIP : (seq_len, embed_dim) -> (seq_len, 512)
     -> S3D : (seq_len, embed_dim) -> (seq_len, 1024)
 """
-
 
 class AdaLNZero(torch.nn.Module):
     def __init__(self, d_cond, d_model, n_heads):
@@ -53,7 +51,7 @@ class AdaLNZero(torch.nn.Module):
         a1, a2, b1, b2, g1, g2 = conditions.chunk(6, dim=2)
 
         norm1 = self.layernorm1(x) * (1 + g1) + b1
-        atn, _ = self.atn(norm1, norm1, norm1)
+        atn, _ = self.atn(norm1, norm1, norm1, need_weights=False)
         gate1 = atn * a1
 
         residual1 = gate1 + x
@@ -100,7 +98,10 @@ class PositionalEncoding(torch.nn.Module):
 class MultiSequential(torch.nn.Sequential):
     def forward(self, *input):
         for module in self._modules.values():
-            input = checkpoint(module, *input,  use_reentrant=False)
+            if self.training: 
+                input = checkpoint(module, *input,  use_reentrant=False)
+            else: 
+                input = module(*input)
         return input
 
 
@@ -128,15 +129,6 @@ class MaskVatAdaLN(torch.nn.Module):
         self.K = K
         self.seq_len = seq_len
         self.codebook_size = codebook_size
-
-        #load DAC
-        dac_model_path = dac.utils.download(model_type="44khz")
-        self.dac_model = dac.DAC.load(dac_model_path)
-        self.dac_model.to("cuda")
-        self.dac_model.eval()
-
-        for p in self.dac_model.parameters():
-            p.requires_grad = False
 
         num_embeddings = codebook_size * K + K
         # (batch, 1, K)
@@ -238,7 +230,7 @@ class MaskVatAdaLN(torch.nn.Module):
     decode the DAC tensor into wav form
     """
 
-    def decode(self, predictions, chunk_size=8):
+    def decode(self, model, predictions, chunk_size=8):
         """
         predictions: (batch, seq_len, K)
         return (raw audio) : (batch, channels, len)
@@ -254,8 +246,8 @@ class MaskVatAdaLN(torch.nn.Module):
         with torch.no_grad():
             for i in range(0, batch, chunk_size): 
                 batch_codes = codes[i:i+chunk_size]
-                z, _, _ = self.dac_model.quantizer.from_codes(batch_codes)
-                audio = self.dac_model.decode(z)
+                z, _, _ = model.quantizer.from_codes(batch_codes)
+                audio = model.decode(z)
                 decoded_audio.append(audio)
 
         audio = torch.cat(decoded_audio, dim=0)

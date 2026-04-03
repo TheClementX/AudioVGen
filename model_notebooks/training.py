@@ -94,6 +94,7 @@ def train_epoch(
         desc="Train",
         dynamic_ncols=True,
         leave=False,
+        mininterval=2.0
     )
 
     for encodings in progress:
@@ -169,6 +170,8 @@ def train_epoch(
 @torch.no_grad()
 def valid_epoch(
     model,
+    ema_model,
+    dac_model, 
     dataloader,
     device,
     metrics: Metrics,
@@ -177,6 +180,9 @@ def valid_epoch(
     distributed=False, 
     rank=0
 ):
+    torch.cuda.empty_cache()
+
+    ema_model.eval()
     model.eval()
 
     progress = tqdm(
@@ -184,6 +190,7 @@ def valid_epoch(
         desc="Val (Cls)",
         dynamic_ncols=True,
         leave=False,
+        mininterval=2.0
     )
 
     #reset frechet distance accumulators
@@ -208,17 +215,19 @@ def valid_epoch(
             # outputs = model(masked_encodings, clip_encoding, s3d_encoding)
             # masked_encodings = inference_mask(outputs, step, steps)
 
-            ouputs_cond = model(masked_encodings, clip_encoding, s3d_encoding)
-            output_uncond = model(masked_encodings, torch.zeros_like(clip_encoding), torch.zeros_like(s3d_encoding))
+            with torch.amp.autocast(device_type='cuda'):
+                outputs_cond = ema_model(masked_encodings, clip_encoding, s3d_encoding)
+                output_uncond = ema_model(masked_encodings, torch.zeros_like(clip_encoding), torch.zeros_like(s3d_encoding))
+                outputs = outputs_cond + omega * (outputs_cond - output_uncond)
 
-            outputs = ouputs_cond + omega * (ouputs_cond - output_uncond)
+            del outputs_cond, output_uncond
             masked_encodings = inference_mask(outputs, step, steps)
 
 
         ######## Get/update model metrics ##########
         #frechet distance metrics
-        predictions = model.decode(masked_encodings)
-        targets = model.decode(dac_encoding)
+        predictions = model.module.decode(dac_model, masked_encodings)
+        targets = model.module.decode(dac_model, dac_encoding)
 
         #update frechet distance embedding accumulators
         if metrics.model_metrics: 

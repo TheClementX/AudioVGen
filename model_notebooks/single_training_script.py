@@ -17,6 +17,7 @@ from torchinfo import summary
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 import numpy as np
+import dac
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("Device: ", DEVICE)
@@ -32,7 +33,7 @@ config = {
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
     "lr": 0.0001,
-    "epochs": 150,
+    "epochs": 400,
     "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
     "batch_size": 256,  # batch size for training
     "checkpoint_dir": "./checkpoints",
@@ -46,16 +47,19 @@ train_dataset, valid_dataset = get_datasets(config["data_root"])
 # Dataloaders
 train_loader = DataLoader(
     dataset=train_dataset,
-    num_workers=5,
+    num_workers=12,
     batch_size=config["batch_size"],
     pin_memory=True,
+    persistent_workers=True,
     shuffle=True,
+    prefetch_factor=4
 )
 valid_loader = DataLoader(
     dataset=valid_dataset,
-    num_workers=5,
-    batch_size=config["batch_size"],
+    num_workers=12,
+    batch_size=16,
     pin_memory=True,
+    prefetch_factor=4
 )
 
 # [dac, clip, s3d]
@@ -75,13 +79,20 @@ model = MaskVatAdaLN(
     config["K"],
     config["codebook_size"],
 ).to(DEVICE)
-
 summary(model)
 
 #setup EMA
 decay = 0.999
 ema_avg_fn = get_ema_multi_avg_fn(decay)
 ema_model = AveragedModel(model, multi_avg_fn=ema_avg_fn)
+
+#load DAC
+dac_model_path = dac.utils.download(model_type="44khz")
+dac_model = dac.DAC.load(dac_model_path)
+dac_model.to("cuda")
+dac_model.eval()
+for p in dac_model.parameters():
+    p.requires_grad = False
 
 # Loss function
 criterion = nn.CrossEntropyLoss()
@@ -106,7 +117,7 @@ scaler = torch.amp.GradScaler(device="cuda")
 CF = ConfigParser()
 CF.read("./config.ini")
 wandb_key = CF.get("Wandb", "key")
-wandb.login(key=wandb_key)
+wandb.login(key="")
 
 run_name = "single_trining_run_const_lr"
 
@@ -203,7 +214,9 @@ for epoch in range(start_epoch, config["epochs"]):
     # Validation and compute frechet distance
     # -----------------------------
     FDM, FDD, FAD = valid_epoch(
+        model, 
         ema_model,
+        dac_model, 
         valid_loader,
         DEVICE,
         inference_metrics,
