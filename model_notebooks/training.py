@@ -226,8 +226,12 @@ def valid_epoch(
 
         ######## Get/update model metrics ##########
         #frechet distance metrics
-        predictions = model.module.decode(dac_model, masked_encodings)
-        targets = model.module.decode(dac_model, dac_encoding)
+        if distributed: 
+            predictions = model.module.decode(dac_model, masked_encodings)
+            targets = model.module.decode(dac_model, dac_encoding)
+        else: 
+            predictions = model.decode(dac_model, masked_encodings)
+            targets = model.decode(dac_model, dac_encoding)
 
         #update frechet distance embedding accumulators
         if metrics.model_metrics: 
