@@ -66,11 +66,14 @@ class AdaLNZero(torch.nn.Module):
         # initially acts as an identity and returns x
         return residual2, c
 
+
 class BiMamba2(torch.nn.Module): 
     """
+    A regular BiMamba block using mamab 2 architecture
     https://arxiv.org/pdf/2404.15772 : bidirectional mamba
     """
     def __init__(self, d_model, d_state=64, d_conv=4, expand=2): 
+        super().__init__()
         self.m_forward = Mamba2(
             d_model = d_model, 
             d_state = d_state, 
@@ -99,14 +102,15 @@ class BiMamba2(torch.nn.Module):
         """
         x : (batch, seq_len, embed_dim)
         """
+
         #forward mamba
         y_forward = self.m_forward(x)
         y_forward = self.norm_forward(y_forward + x)
 
         #backward mamba
-        x_flip = torch.flip(x, dim=-2)
+        x_flip = torch.flip(x, dims=[1])
         y_backward = self.m_backward(x_flip)
-        y_backward = torch.flip(y_backward, dim=-2)
+        y_backward = torch.flip(y_backward, dims=[1])
         y_backward = self.norm_backward(y_backward+x)
 
         #combine forward and backward
@@ -120,6 +124,81 @@ class BiMamba2(torch.nn.Module):
 
         return out
 
+class BiMamba2AdaLN(torch.nn.Module): 
+    """
+    A novel AdaLN bi-mamba block architecutre
+    https://arxiv.org/pdf/2404.15772 : bidirectional mamba
+    """
+    def __init__(self, d_model, d_cond, d_state=64, d_conv=4, expand=2): 
+        super().__init__()
+        self.m_forward = Mamba2(
+            d_model = d_model, 
+            d_state = d_state, 
+            expand = expand, 
+            d_conv = d_conv
+        )
+
+        self.m_backward = Mamba2(
+            d_model = d_model, 
+            d_state = d_state, 
+            expand = expand, 
+            d_conv = d_conv
+        )
+
+        self.ff = torch.nn.Sequential(
+            torch.nn.Linear(d_model, 2 * d_model),
+            torch.nn.ReLU(),
+            torch.nn.Linear(2 * d_model, d_model),
+        )
+
+        #adaln modulation
+        self.adaln_mod = torch.nn.Sequential(
+            # activation
+            torch.nn.SiLU(),
+            torch.nn.Linear(d_cond, 9 * d_model),
+        )
+
+        torch.nn.init.constant_(self.adaln_mod[-1].weight, 0)
+        torch.nn.init.constant_(self.adaln_mod[-1].bias, 0)
+
+        self.norm_forward = torch.nn.LayerNorm(d_model)
+        self.norm_backward = torch.nn.LayerNorm(d_model)
+        self.norm_final = torch.nn.LayerNorm(d_model)
+
+    def forward(self, x, c): 
+        """
+        x : (batch, seq_len, embed_dim)
+        """
+        #create conditions
+        conditions = self.adaln_mod(c)
+        a1, a2, a3, b1, b2, b3, g1, g2, g3 = conditions.chunk(9, dim=2)
+        #flip for reversed mamba block
+        g2 = torch.flip(g2, dims=[1])
+        b2 = torch.flip(b2, dims=[1])
+
+        #forward mamba
+        norm_f = self.norm_forward(x) * (1 + g1) + b1
+        x_f = self.m_forward(norm_f)
+        gate_f = a1 * x_f
+
+        #backward
+        x_flip = torch.flip(x, dims=[1])
+        norm_b = self.norm_backward(x_flip) * (1 + g2) + b2
+        x_b = self.m_backward(norm_b)
+        x_b = torch.flip(x_b, dims=[1])
+        gate_b = a2 * x_b
+
+        #combined residual
+        residual = gate_b + gate_f + x
+
+        #combine
+        norm_out = self.norm_final(residual) * (1 + g3) + b3
+        ff_out = self.ff(norm_out)
+
+        gate3 = ff_out * a3
+        out = gate3 + residual
+
+        return out, c
 
 class PositionalEncoding(torch.nn.Module):
     def __init__(self, seq_len, embed_dim):
@@ -138,7 +217,7 @@ class PositionalEncoding(torch.nn.Module):
         # odds
         pe_matrix[:, 1::2] = torch.cos(pos * div_term)
         # (batch, seq_len, embed_dim)
-        pe_matrix = pe_matrix.unsqueeze(0)
+        pe_matrix = pe_matrix.unsqueeze(0).to(torch.bfloat16)
 
         self.register_buffer("pe_matrix", pe_matrix)
 
@@ -149,19 +228,6 @@ class PositionalEncoding(torch.nn.Module):
         seq_len = x.shape[1]
         return x + self.pe_matrix[:, :seq_len, :]
 
-class AdaLNMamba2(torch.nn.Module): 
-    def __init__(self, d_model, d_cond, num_heads, d_state, d_conv, expand, ratio=4): 
-        self.dit = AdaLNZero(d_cond, d_model, num_heads)
-        
-        mamba = [BiMamba2(d_model, d_state, d_conv, expand) for _ in range(ratio)]
-        self.mamba = torch.nn.Sequential(*mamba)
-
-    def forward(self, x, c): 
-        x, c = self.dit(x, c)
-        y = self.mamba(x)
-
-        return y, c
-
 class MultiSequential(torch.nn.Sequential):
     def forward(self, *input):
         for module in self._modules.values():
@@ -170,6 +236,19 @@ class MultiSequential(torch.nn.Sequential):
             else: 
                 input = module(*input)
         return input
+
+class AdaLNMamba2(torch.nn.Module): 
+    def __init__(self, d_model, d_cond, num_heads, d_state, d_conv, expand, ratio=4): 
+        super().__init__()
+        self.dit = AdaLNZero(d_cond, d_model, num_heads)
+        
+        mamba = [BiMamba2AdaLN(d_model, d_cond, d_state, d_conv, expand) for _ in range(ratio)]
+        self.mamba = MultiSequential(*mamba)
+
+    def forward(self, x, c): 
+        x, c = self.dit(x, c)
+        y, c = self.mamba(x, c)
+        return y, c
 
 class AudioVGen(torch.nn.Module):
     def __init__(
@@ -287,7 +366,7 @@ class AudioVGen(torch.nn.Module):
 
         if self.training:
             batch = conditions.shape[0]
-            drop_mask = (torch.rand(batch, 1, 1, device=conditions.device) > 0.1).float()
+            drop_mask = (torch.rand(batch, 1, 1, device=conditions.device) > 0.1).to(conditions.dtype)
             conditions = conditions * drop_mask
 
         DiT, _ = self.backbone(dac_embeddings, conditions)

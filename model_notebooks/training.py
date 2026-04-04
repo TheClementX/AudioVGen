@@ -62,7 +62,6 @@ def train_epoch(
     dataloader,
     optimizer,
     scheduler,
-    scaler,
     device,
     criterion,
     codebooks_size=1024,
@@ -104,27 +103,24 @@ def train_epoch(
         dac_encoding, clip_encoding, s3d_encoding = encodings
         #change device
         dac_encoding = dac_encoding.to(rank if distributed else device)
-        clip_encoding = clip_encoding.to(rank if distributed else device)
-        s3d_encoding = s3d_encoding.to(rank if distributed else device)
+        clip_encoding = clip_encoding.to(rank if distributed else device).to(torch.bfloat16)
+        s3d_encoding = s3d_encoding.to(rank if distributed else device).to(torch.bfloat16)
 
         masked_encodings, targets = training_mask(dac_encoding, codebooks_size)
 
         # Forward pass (mixed precision)
-        with torch.amp.autocast(device_type="cuda"):
-            outputs = model(masked_encodings, clip_encoding, s3d_encoding)
-            logits = torch.permute(outputs, (0, 3, 1, 2))
-            loss = criterion(logits, targets)
+        outputs = model(masked_encodings, clip_encoding, s3d_encoding)
+        logits = torch.permute(outputs, (0, 3, 1, 2)).to(torch.float32)
+        loss = criterion(logits, targets)
 
         batch_loss = loss.item()
 
         # Backward + optimizer step (AMP-safe)
-        scaler.scale(loss).backward()
+        loss.backward()
 
-        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
 
         # Metrics
 
@@ -152,8 +148,8 @@ def train_epoch(
         if scheduler is not None:
             scheduler.step()
 
-        #update ema_model weights
-        ema_model.update_parameters(model)
+    #update ema_model weights
+    ema_model.update_parameters(model)
 
     #if distributed take average total loss
     if distributed: 
@@ -197,28 +193,23 @@ def valid_epoch(
     metrics.reset_embedding_lists()
 
     for encodings in progress:
-
         #unpack encoding
         dac_encoding, clip_encoding, s3d_encoding = encodings
 
         #change device
         dac_encoding = dac_encoding.to(rank if distributed else device)
-        clip_encoding = clip_encoding.to(rank if distributed else device)
-        s3d_encoding = s3d_encoding.to(rank if distributed else device)
+        clip_encoding = clip_encoding.to(rank if distributed else device).to(torch.bfloat16)
+        s3d_encoding = s3d_encoding.to(rank if distributed else device).to(torch.bfloat16)
 
         #apply masking
         masked_encodings = torch.full(dac_encoding.shape, codebook_size, device=dac_encoding.device)
         omega = 3.0
         #inference forward pass
         for step in range(steps):
-            # Forward pass (inference-only)
-            # outputs = model(masked_encodings, clip_encoding, s3d_encoding)
-            # masked_encodings = inference_mask(outputs, step, steps)
-
-            with torch.amp.autocast(device_type='cuda'):
-                outputs_cond = ema_model(masked_encodings, clip_encoding, s3d_encoding)
-                output_uncond = ema_model(masked_encodings, torch.zeros_like(clip_encoding), torch.zeros_like(s3d_encoding))
-                outputs = outputs_cond + omega * (outputs_cond - output_uncond)
+            outputs_cond = ema_model(masked_encodings, clip_encoding, s3d_encoding)
+            output_uncond = ema_model(masked_encodings, torch.zeros_like(clip_encoding), torch.zeros_like(s3d_encoding))
+            outputs = outputs_cond + omega * (outputs_cond - output_uncond)
+            outputs = outputs.to(torch.float32)
 
             del outputs_cond, output_uncond
             masked_encodings = inference_mask(outputs, step, steps)
@@ -226,8 +217,14 @@ def valid_epoch(
 
         ######## Get/update model metrics ##########
         #frechet distance metrics
-        predictions = model.module.decode(dac_model, masked_encodings)
-        targets = model.module.decode(dac_model, dac_encoding)
+        predictions = None
+        targets = None
+        if distributed:
+            predictions = model.module.decode(dac_model, masked_encodings)
+            targets = model.module.decode(dac_model, dac_encoding)
+        else: 
+            predictions = model.decode(dac_model, masked_encodings)
+            targets = model.decode(dac_model, dac_encoding)
 
         #update frechet distance embedding accumulators
         if metrics.model_metrics: 
