@@ -31,7 +31,7 @@ config = {
     "expand": 2, 
     "c_dim": 512,  # dimensions of clip encoding
     "s_dim": 1024,  # dimensions of s3d encoding
-    "M": 4,  # number of AdaLN Blocks in the model
+    "M": 12,  # number of AdaLN Blocks in the model
     "K": 9,  # dimensions of DAC encoding
     "codebook_size": 1024,  # size of codebook
     "weight_decay": 0.00001,  # from paper
@@ -42,8 +42,10 @@ config = {
     "checkpoint_dir": "./checkpoints",
     "pct_start" : 0.2,
     "scheduler": True,
-    "ratio":6
+    "ratio":3
 }
+
+#get data dir
 
 # Datasets
 train_dataset, valid_dataset = get_datasets(config["data_root"])
@@ -56,14 +58,14 @@ train_loader = DataLoader(
     pin_memory=True,
     persistent_workers=True,
     shuffle=True,
-    prefetch_factor=4
+    prefetch_factor=2
 )
 valid_loader = DataLoader(
     dataset=valid_dataset,
-    num_workers=12,
+    num_workers=4,
     batch_size=config['batch_size'],
     pin_memory=True,
-    prefetch_factor=4
+    prefetch_factor=2
 )
 
 # [dac, clip, s3d]
@@ -88,6 +90,7 @@ model = AudioVGen(
     ratio=config['ratio']
 ).to(DEVICE).to(torch.bfloat16)
 summary(model)
+model = torch.compile(model)
 
 #setup EMA
 decay = 0.999
@@ -121,7 +124,7 @@ if config['scheduler']:
 
 wandb.login(key="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")
 
-run_name = "mamba_single_test"
+run_name = "mamba_adaln2_ablation_2"
 
 run = wandb.init(
     name = run_name,
@@ -201,16 +204,16 @@ for epoch in range(start_epoch, config["epochs"]):
     # -----------------------------
     # Train
     # -----------------------------
-    # train_loss = train_epoch(
-    #     model, ema_model, train_loader, optimizer, scheduler, DEVICE, criterion
-    # )
-    # curr_lr = optimizer.param_groups[0]["lr"]
-    # print(f"Train | Loss: {train_loss:.4f} | LR: {curr_lr:.6f}")
+    train_loss = train_epoch(
+        model, ema_model, train_loader, optimizer, scheduler, DEVICE, criterion
+    )
+    curr_lr = optimizer.param_groups[0]["lr"]
+    print(f"Train | Loss: {train_loss:.4f} | LR: {curr_lr:.6f}")
 
-    # metrics = {
-    #     "train_loss": train_loss,
-    #     "lr": curr_lr,
-    # }
+    metrics = {
+        "train_loss": train_loss,
+        "lr": curr_lr,
+    }
 
     # -----------------------------
     # Validation and compute frechet distance

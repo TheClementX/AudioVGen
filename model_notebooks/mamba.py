@@ -124,7 +124,51 @@ class BiMamba2(torch.nn.Module):
 
         return out
 
-class BiMamba2AdaLN(torch.nn.Module): 
+class BiMamba2AdaLN2(torch.nn.Module): 
+    """
+    a variation of mamba adaln where adaln is only used before bimamba and 
+    feed forward
+    """
+
+    def __init__(self, d_model, d_cond, d_state=64, d_conv=4, expand=2): 
+        super().__init__()
+        #main blocks
+        self.mamba = BiMamba2(d_model, d_state, d_conv, expand)
+        self.ff = torch.nn.Sequential(
+            torch.nn.Linear(d_model, d_model * 2), 
+            torch.nn.ReLU(), 
+            torch.nn.Linear(d_model * 2, d_model)
+        )
+
+        #layer norms
+        self.ln_mamba = torch.nn.LayerNorm(d_model)
+        self.ln_ff = torch.nn.LayerNorm(d_model)
+
+        #adaln modulation
+        self.adaln_mod = torch.nn.Sequential(
+            torch.nn.SiLU(), 
+            torch.nn.Linear(d_cond, 6 * d_model)
+        )
+
+    def forward(self, x, c): 
+        conditions = self.adaln_mod(c)
+        a1, b1, g1, a2, b2, g2 = conditions.chunk(6, dim=2)
+
+        norm1 = self.ln_mamba(x) * (1 + g1) + b1
+        mamba_out = self.mamba(norm1)
+        gate1 = mamba_out * a1
+
+        residual =  x + gate1
+
+        norm2 = self.ln_ff(residual)
+        ff_out = self.ff(norm2)
+        gate2 = ff_out * a1
+
+        out = gate2 + residual
+
+        return out, c
+
+class BiMamba2AdaLN3(torch.nn.Module): 
     """
     A novel AdaLN bi-mamba block architecutre
     https://arxiv.org/pdf/2404.15772 : bidirectional mamba
@@ -242,7 +286,7 @@ class AdaLNMamba2(torch.nn.Module):
         super().__init__()
         self.dit = AdaLNZero(d_cond, d_model, num_heads)
         
-        mamba = [BiMamba2AdaLN(d_model, d_cond, d_state, d_conv, expand) for _ in range(ratio)]
+        mamba = [BiMamba2AdaLN2(d_model, d_cond, d_state, d_conv, expand) for _ in range(ratio)]
         self.mamba = MultiSequential(*mamba)
 
     def forward(self, x, c): 
