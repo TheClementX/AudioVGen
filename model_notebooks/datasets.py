@@ -213,8 +213,8 @@ class Metrics:
             pred_mel = waveform_to_examples(pred_audio, 16000)
             tar_mel = waveform_to_examples(tar_audio, 16000)
 
-            pred_mfcc.append(torch.from_numpy(pred_mel).float())
-            target_mfcc.append(torch.from_numpy(tar_mel).float())
+            pred_mfcc.append(pred_mel.float())
+            target_mfcc.append(tar_mel.float())
 
         #calculate actual VGGish embeddings
         pred_tensor = torch.cat(pred_mfcc, dim=0).to(self.device)
@@ -354,10 +354,40 @@ class Metrics:
         #  Torch will automatically L2 normalize
         batch_sims = torch.nn.functional.cosine_similarity(pred_emb, target_emb, dim=-1)
 
-        return batch_sims.mean().item()
+        return batch_sims.sum().item()
 
-    def cycle_clip(self, predictions, targets):
-        pass
+    def cycle_clip(self, predictions, video_clip_embeds):
+        """
+        CycleCLIP (CC):
+            project only the generated audio into CLIP space via Wav2CLIP,
+            and compare it against the mean video CLIP embedding.
+            Both sides are L2-normalized before cosine similarity.
+
+        predictions         : raw generated audio [batch, channels, samples] @ 44.1kHz
+        video_clip_embeds   : per-frame CLIP image embeddings of the source
+                              video, shape [batch, num_frames, clip_dim]
+                              (or [batch, clip_dim] if already averaged)
+
+        return: mean CycleCLIP score over the batch
+        """
+        # waveform -> Wav2CLIP embedding
+        predictions = predictions.squeeze(1)                    # [B, T]
+        predictions = self.resampler(predictions)               # 44.1k -> 16k
+        pred_audio = predictions.detach().cpu().numpy()
+        pred_emb = wav2clip.embed_audio(pred_audio, self.wav2clip_model)
+        pred_emb = torch.from_numpy(pred_emb)                   # [B, 512]
+
+        # average CLIP image embedding over frames
+        video_clip_embeds = video_clip_embeds.detach().cpu().float()
+        if video_clip_embeds.dim() == 3:
+            video_emb = video_clip_embeds.mean(dim=1)           # [B, clip_dim]
+        else:
+            video_emb = video_clip_embeds                       # already [B, clip_dim]
+
+        # cosine_similarity internally L2-normalizes both sides
+        batch_sims = F.cosine_similarity(pred_emb, video_emb, dim=-1)
+
+        return batch_sims.sum().item()
 
     def _get_beats_encodings(self, audio):
         audio = audio.squeeze(1)
@@ -423,12 +453,18 @@ class Metrics:
         std_targ = torch.sqrt((targ_centered**2).sum(dim=-1))
 
         corr = cov / (std_pred * std_targ + 1e-8)  # add epsilon
-        return corr.sum()  # we'll divide by the total items at the end.
+        return corr.sum().item()  # we'll divide by the total items at the end.
 
 class AudioVideoDataset(Dataset):
-    def __init__(self, data_paths, with_beats=False):
+    def __init__(self, data_paths, with_beats=False, is_valid=False):
         self.data_paths = data_paths
         self.with_beats = with_beats
+
+        self.data_paths.sort()
+        if is_valid:
+            with open("./valid_files.txt", "w") as f:
+                for line in self.data_paths:
+                    f.write(f"{line}\n")
 
     def __len__(self):
         return len(self.data_paths)
@@ -470,7 +506,7 @@ def get_datasets(root, validation_ratio=0.05, with_beats=False):
                 data_paths.append((audio_file_path, video_file_path))
 
     num_validation = math.ceil(len(data_paths) * validation_ratio)
-    valid_dataset = AudioVideoDataset(data_paths[:num_validation], with_beats)
+    valid_dataset = AudioVideoDataset(data_paths[:num_validation], with_beats, is_valid=True)
     train_dataset = AudioVideoDataset(data_paths[num_validation:])
 
     return train_dataset, valid_dataset
