@@ -48,7 +48,7 @@ config = {
 #get data dir
 
 # Datasets
-train_dataset, valid_dataset = get_datasets(config["data_root"])
+train_dataset, valid_dataset = get_datasets(config["data_root"], validation_ratio=0.004)
 
 # Dataloaders
 train_loader = DataLoader(
@@ -124,7 +124,7 @@ if config['scheduler']:
 
 wandb.login(key="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")
 
-run_name = "mamba_adaln2_ablation_2"
+run_name = "mamba_adaln2_ablation_3"
 
 run = wandb.init(
     name = run_name,
@@ -182,12 +182,12 @@ gc.collect()
 torch.cuda.empty_cache()
 
 #load a model for training resume
-load = False
+load = True
 if load: 
     print('loading a model for training')
     map_location = DEVICE
     checkpoint = torch.load(
-        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/fifth_checkpoint.pth', 
+        '/ocean/projects/cis260059p/lundgren/AudioVGen/checkpoints/last_mamba_adaln2_ablation_3.pth', 
         map_location=map_location
     )
     model.load_state_dict(checkpoint['model_state_dict'])

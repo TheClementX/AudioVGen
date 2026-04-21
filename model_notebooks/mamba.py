@@ -66,7 +66,6 @@ class AdaLNZero(torch.nn.Module):
         # initially acts as an identity and returns x
         return residual2, c
 
-
 class BiMamba2(torch.nn.Module): 
     """
     A regular BiMamba block using mamab 2 architecture
@@ -88,16 +87,6 @@ class BiMamba2(torch.nn.Module):
             d_conv = d_conv
         )
 
-        self.ff = torch.nn.Sequential(
-            torch.nn.Linear(d_model, 2 * d_model),
-            torch.nn.ReLU(),
-            torch.nn.Linear(2 * d_model, d_model),
-        )
-
-        self.norm_forward = torch.nn.LayerNorm(d_model)
-        self.norm_backward = torch.nn.LayerNorm(d_model)
-        self.norm_final = torch.nn.LayerNorm(d_model)
-
     def forward(self, x): 
         """
         x : (batch, seq_len, embed_dim)
@@ -105,24 +94,16 @@ class BiMamba2(torch.nn.Module):
 
         #forward mamba
         y_forward = self.m_forward(x)
-        y_forward = self.norm_forward(y_forward + x)
 
         #backward mamba
         x_flip = torch.flip(x, dims=[1])
         y_backward = self.m_backward(x_flip)
         y_backward = torch.flip(y_backward, dims=[1])
-        y_backward = self.norm_backward(y_backward+x)
 
         #combine forward and backward
         y = y_forward + y_backward
 
-        #feed forward
-        y_ff = self.ff(y)
-
-        #final output
-        out = self.norm_final(y_ff + y)
-
-        return out
+        return y
 
 class BiMamba2AdaLN2(torch.nn.Module): 
     """
@@ -149,6 +130,10 @@ class BiMamba2AdaLN2(torch.nn.Module):
             torch.nn.SiLU(), 
             torch.nn.Linear(d_cond, 6 * d_model)
         )
+
+        #zero initializaiton
+        torch.nn.init.constant_(self.adaln_mod[-1].weight, 0)
+        torch.nn.init.constant_(self.adaln_mod[-1].bias, 0)
 
     def forward(self, x, c): 
         conditions = self.adaln_mod(c)
@@ -202,6 +187,7 @@ class BiMamba2AdaLN3(torch.nn.Module):
             torch.nn.Linear(d_cond, 9 * d_model),
         )
 
+        #zero initialization
         torch.nn.init.constant_(self.adaln_mod[-1].weight, 0)
         torch.nn.init.constant_(self.adaln_mod[-1].bias, 0)
 
