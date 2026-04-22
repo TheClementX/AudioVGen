@@ -8,7 +8,7 @@ import gc
 import os
 from configparser import ConfigParser
 
-from models import MaskVatAdaLN
+from mamba import AudioVGen
 from datasets import get_datasets
 from training import train_epoch, valid_epoch
 from datasets import Metrics
@@ -26,6 +26,9 @@ config = {
     "seq_len": 862,  # seq_len of DAC encoding
     "embed_dim": 512,  # embed_dim for the model
     "n_heads": 16,  # number of heads for multiheaded attention
+    "d_state": 128, 
+    "d_conv": 4, 
+    "expand": 2, 
     "c_dim": 512,  # dimensions of clip encoding
     "s_dim": 1024,  # dimensions of s3d encoding
     "M": 12,  # number of AdaLN Blocks in the model
@@ -34,15 +37,18 @@ config = {
     "weight_decay": 0.00001,  # from paper
     "lr": 0.0001,
     "epochs": 400,
-    "data_root": "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
+    "data_root": "/ocean/projects/cis260059p/shared/AudioVGen/VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video",  # root of audio-video data
     "batch_size": 256,  # batch size for training
     "checkpoint_dir": "./checkpoints",
     "pct_start" : 0.2,
-    "scheduler": True
+    "scheduler": True,
+    "ratio":3
 }
 
+#get data dir
+
 # Datasets
-train_dataset, valid_dataset = get_datasets(config["data_root"])
+train_dataset, valid_dataset = get_datasets(config["data_root"], validation_ratio=0.004)
 
 # Dataloaders
 train_loader = DataLoader(
@@ -52,14 +58,14 @@ train_loader = DataLoader(
     pin_memory=True,
     persistent_workers=True,
     shuffle=True,
-    prefetch_factor=4
+    prefetch_factor=2
 )
 valid_loader = DataLoader(
     dataset=valid_dataset,
-    num_workers=12,
-    batch_size=16,
+    num_workers=4,
+    batch_size=config['batch_size'],
     pin_memory=True,
-    prefetch_factor=4
+    prefetch_factor=2
 )
 
 # [dac, clip, s3d]
@@ -69,17 +75,22 @@ print(f"dac dimensions {retlist[0].shape}")
 print(f"clip dimensions {retlist[1].shape}")
 print(f"s3d dimensions {retlist[2].shape}")
 
-model = MaskVatAdaLN(
+model = AudioVGen(
     config["seq_len"],
     config["embed_dim"],
     config["n_heads"],
+    config["d_state"], 
+    config["d_conv"], 
+    config["expand"], 
     config["c_dim"],
     config["s_dim"],
     config["M"],
     config["K"],
     config["codebook_size"],
-).to(DEVICE)
+    ratio=config['ratio']
+).to(DEVICE).to(torch.bfloat16)
 summary(model)
+model = torch.compile(model)
 
 #setup EMA
 decay = 0.999
@@ -108,18 +119,12 @@ if config['scheduler']:
     scheduler = optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=0.01,
-        total_iters=20,
+        total_iters=3000,
     )
 
-# Mixed-Precision Training
-scaler = torch.amp.GradScaler(device="cuda")
+wandb.login(key="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")
 
-CF = ConfigParser()
-CF.read("./config.ini")
-wandb_key = CF.get("Wandb", "key")
-wandb.login(key="")
-
-run_name = "single_trining_run_const_lr"
+run_name = "mamba_adaln2_ablation_3"
 
 run = wandb.init(
     name = run_name,
@@ -177,12 +182,12 @@ gc.collect()
 torch.cuda.empty_cache()
 
 #load a model for training resume
-load = False
+load = True
 if load: 
     print('loading a model for training')
     map_location = DEVICE
     checkpoint = torch.load(
-        '/ocean/projects/cis260059p/shared/AudioVGen/checkpoints/fifth_checkpoint.pth', 
+        '/ocean/projects/cis260059p/lundgren/AudioVGen/checkpoints/last_mamba_adaln2_ablation_3.pth', 
         map_location=map_location
     )
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -200,7 +205,7 @@ for epoch in range(start_epoch, config["epochs"]):
     # Train
     # -----------------------------
     train_loss = train_epoch(
-        model, ema_model, train_loader, optimizer, scheduler, scaler, DEVICE, criterion
+        model, ema_model, train_loader, optimizer, scheduler, DEVICE, criterion
     )
     curr_lr = optimizer.param_groups[0]["lr"]
     print(f"Train | Loss: {train_loss:.4f} | LR: {curr_lr:.6f}")
