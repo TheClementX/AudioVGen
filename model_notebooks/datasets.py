@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import sys
 import dac
 from vggish.vggish_input import waveform_to_examples
+from data_scripts.beats.BEATs import BEATs, BEATsConfig
 
 PREENCODE_DIR = (
     "./VGGSound_raw_data/scratch/shared/beegfs/hchen/train_data/VGGSound_final/video"
@@ -144,6 +145,15 @@ class Metrics:
             self.dac_model.to("cuda")
             self.dac_model.eval()
 
+            # load BEATs
+            beats_path = "./data_scripts/beats/BEATs_iter3_plus_AS2M.pt"
+            beats_checkpoint = torch.load(beats_path)
+            cfg = BEATsConfig(beats_checkpoint["cfg"])
+            self.beats_model = BEATs(cfg)
+            self.beats_model.load_state_dict(beats_checkpoint["model"])
+            self.beats_model.to("cuda")
+            self.beats_model.eval()
+
         self.reset_embedding_lists()
 
     def reset_embedding_lists(self): 
@@ -203,8 +213,8 @@ class Metrics:
             pred_mel = waveform_to_examples(pred_audio, 16000)
             tar_mel = waveform_to_examples(tar_audio, 16000)
 
-            pred_mfcc.append(torch.from_numpy(pred_mel).float())
-            target_mfcc.append(torch.from_numpy(tar_mel).float())
+            pred_mfcc.append(pred_mel.float())
+            target_mfcc.append(tar_mel.float())
 
         #calculate actual VGGish embeddings
         pred_tensor = torch.cat(pred_mfcc, dim=0).to(self.device)
@@ -344,46 +354,117 @@ class Metrics:
         #  Torch will automatically L2 normalize
         batch_sims = torch.nn.functional.cosine_similarity(pred_emb, target_emb, dim=-1)
 
-        return batch_sims.mean().item()
+        return batch_sims.sum().item()
 
-    def cycle_clip(self, predictions, targets):
-        pass
+    def cycle_clip(self, predictions, video_clip_embeds):
+        """
+        CycleCLIP (CC):
+            project only the generated audio into CLIP space via Wav2CLIP,
+            and compare it against the mean video CLIP embedding.
+            Both sides are L2-normalized before cosine similarity.
 
-    def _get_novelty_curve(self, tensor, kernel, k):
+        predictions         : raw generated audio [batch, channels, samples] @ 44.1kHz
+        video_clip_embeds   : per-frame CLIP image embeddings of the source
+                              video, shape [batch, num_frames, clip_dim]
+                              (or [batch, clip_dim] if already averaged)
+
+        return: mean CycleCLIP score over the batch
+        """
+        # waveform -> Wav2CLIP embedding
+        predictions = predictions.squeeze(1)                    # [B, T]
+        predictions = self.resampler(predictions)               # 44.1k -> 16k
+        pred_audio = predictions.detach().cpu().numpy()
+        pred_emb = wav2clip.embed_audio(pred_audio, self.wav2clip_model)
+        pred_emb = torch.from_numpy(pred_emb)                   # [B, 512]
+
+        # average CLIP image embedding over frames
+        video_clip_embeds = video_clip_embeds.detach().cpu().float()
+        if video_clip_embeds.dim() == 3:
+            video_emb = video_clip_embeds.mean(dim=1)           # [B, clip_dim]
+        else:
+            video_emb = video_clip_embeds                       # already [B, clip_dim]
+
+        # cosine_similarity internally L2-normalizes both sides
+        batch_sims = F.cosine_similarity(pred_emb, video_emb, dim=-1)
+
+        return batch_sims.sum().item()
+
+    def _get_beats_encodings(self, audio):
+        audio = audio.squeeze(1)
+
+        with torch.no_grad():
+            mask = torch.zeros(audio.shape).bool().to(self.device)
+            features = self.beats_model.extract_features(
+                audio, padding_mask=mask,
+            )[0]
+
+        return features
+
+    def _get_novelty_curve(self, features, kernel, k):
+        # normalize
+        features_norm = F.normalize(features, dim=-1)
+
         # compute self-similarity matrix
-        ssm = torch.matmul(tensor, tensor.transpose(-1, -2)).unsqueeze(1)
+        ssm = torch.bmm(features_norm, features_norm.transpose(1, 2))
+        seq_len = ssm.shape[1]
 
-        res = F.conv2d(
-            ssm,
-            kernel,
-            padding=k // 2,
-        ).squeeze(1)
+        # perform 2d conv
+        ssm_unsqueeze = ssm.unsqueeze(1)
+        ssm_padded = F.pad(ssm_unsqueeze, (k, k, k, k))
+        novelty_2d = F.conv2d(ssm_padded, kernel)
 
-        nov = torch.diagonal(res, dim1=1, dim2=2)
-        nov = nov - nov.mean(dim=-1, keepdim=True)
-        nov = F.normalize(nov, dim=-1)
+        # extract diag
+        novelty_2d = novelty_2d.squeeze(1)
+        novelty_curve = torch.diagonal(novelty_2d, dim1=1, dim2=2)
 
-        return nov
+        # removing padding artifacts
+        return novelty_curve[:, :seq_len]
 
     def novelty_score(self, predictions, targets):
-        # TODO: convert waveform into BEATs encoding here
+        beats_pred = self._get_beats_encodings(predictions)
+        beats_targ = self._get_beats_encodings(targets)
+
+        # create kernel
         k = 16  # kernel will be 16x16 for now
-        kernel = torch.ones(k, k)
-        kernel[: k // 2, : k // 2] = -1
-        kernel[k // 2 :, k // 2 :] = -1
-        kernel = kernel.unsqueeze(0).unsqueeze(0).to(self.device)
+        L = k // 2
+        kernel = torch.ones((k, k), device=self.device)
+        kernel[:L, :L] = -1
+        kernel[L:, L:] = -1
 
-        pred_nov = self._get_novelty_curve(predictions, kernel, k)
-        targ_nov = self._get_novelty_curve(targets, kernel, k)
+        # add gaussian tapering
+        var = 0.5
+        grid = torch.arange(-L, L, dtype=torch.float32, device=self.device) + 0.5
+        y, x = torch.meshgrid(grid, grid, indexing='ij')
+        gaussian = torch.exp(-(x**2 + y**2) / (2 * (var * L)**2))
 
-        corr = (pred_nov * targ_nov).sum(dim=-1, keepdim=True)
+        kernel = kernel * gaussian
+        kernel = kernel / kernel.abs().sum() # normalize
+        kernel = kernel.unsqueeze(0).unsqueeze(0)
 
-        return corr.mean()
+        pred_nov = self._get_novelty_curve(beats_pred, kernel, k)
+        targ_nov = self._get_novelty_curve(beats_targ, kernel, k)
+
+        # compute pearson while normalizing curves
+        pred_centered = pred_nov - pred_nov.mean(dim=-1, keepdim=True)
+        targ_centered = targ_nov - targ_nov.mean(dim=-1, keepdim=True)
+
+        cov = (pred_centered * targ_centered).sum(dim=-1)
+        std_pred = torch.sqrt((pred_centered**2).sum(dim=-1))
+        std_targ = torch.sqrt((targ_centered**2).sum(dim=-1))
+
+        corr = cov / (std_pred * std_targ + 1e-8)  # add epsilon
+        return corr.sum().item()  # we'll divide by the total items at the end.
 
 class AudioVideoDataset(Dataset):
-    def __init__(self, data_paths, with_beats=False):
+    def __init__(self, data_paths, with_beats=False, is_valid=False):
         self.data_paths = data_paths
         self.with_beats = with_beats
+
+        self.data_paths.sort()
+        if is_valid:
+            with open("./valid_files.txt", "w") as f:
+                for line in self.data_paths:
+                    f.write(f"{line}\n")
 
     def __len__(self):
         return len(self.data_paths)
@@ -425,7 +506,7 @@ def get_datasets(root, validation_ratio=0.05, with_beats=False):
                 data_paths.append((audio_file_path, video_file_path))
 
     num_validation = math.ceil(len(data_paths) * validation_ratio)
-    valid_dataset = AudioVideoDataset(data_paths[:num_validation], with_beats)
+    valid_dataset = AudioVideoDataset(data_paths[:num_validation], with_beats, is_valid=True)
     train_dataset = AudioVideoDataset(data_paths[num_validation:])
 
     return train_dataset, valid_dataset

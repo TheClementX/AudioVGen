@@ -6,3 +6,5 @@ BEATs_iter3_plus_AS2M.pt
 checkpoints
 wandb
 config.ini
+videos
+valid_files.txt
